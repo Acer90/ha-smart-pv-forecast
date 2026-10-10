@@ -20,6 +20,7 @@ Azimuth convention:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -49,6 +50,7 @@ class ForecastSolarClient:
         latitude: float,
         longitude: float,
         pv_arrays: list[dict[str, Any]],
+        shading_factor_fn: Callable[[int, datetime], float] | None = None,
     ) -> "ForecastSolarEstimate":
         """Fetch and combine estimates for all given PV arrays.
 
@@ -59,17 +61,30 @@ class ForecastSolarClient:
             raise ValueError("No PV arrays configured for forecast.solar")
 
         per_array: list[_ArrayEstimate] = []
-        for array in pv_arrays:
+        baseline: list[dict[datetime, float]] = []
+        for index, array in enumerate(pv_arrays):
             ae = await self._fetch_one_array(
-                latitude=latitude,
-                longitude=longitude,
+                latitude=array.get("latitude", latitude),
+                longitude=array.get("longitude", longitude),
                 tilt=array["tilt"],
                 azimuth_ha=array["azimuth"],
                 peak_wp=array["peak"],
             )
+            baseline.append(dict(ae.wh_period))
+            if shading_factor_fn is not None:
+                ae.wh_period = {
+                    ts: value * shading_factor_fn(index, ts)
+                    for ts, value in ae.wh_period.items()
+                }
+                ae.wh_days = {}
+                for ts, value in ae.wh_period.items():
+                    day = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+                    ae.wh_days[day] = ae.wh_days.get(day, 0.0) + value
             per_array.append(ae)
 
-        return _merge_array_estimates(per_array)
+        combined = _merge_array_estimates(per_array)
+        combined.array_wh_period = baseline
+        return combined
 
     async def _fetch_one_array(
         self,
@@ -131,7 +146,7 @@ class _ArrayEstimate:
 class ForecastSolarEstimate:
     """Combined estimate across all PV arrays, ready for use in the coordinator."""
 
-    __slots__ = ("timezone", "watts", "wh_period", "wh_days")
+    __slots__ = ("timezone", "watts", "wh_period", "wh_days", "array_wh_period")
 
     def __init__(
         self,
@@ -144,6 +159,7 @@ class ForecastSolarEstimate:
         self.watts = watts
         self.wh_period = wh_period
         self.wh_days = wh_days
+        self.array_wh_period: list[dict[datetime, float]] = []
 
 
 # ---------------------------------------------------------------------------

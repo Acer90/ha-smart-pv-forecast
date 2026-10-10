@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<title>Solarstudio geometry regression tests</title>
+<pre id="results">Tests laufen …</pre>
+<script type="module">
+import { areaCenter, localPoint, geographicPoint, surfaceProfile, surfaceVertices } from "../frontend/geometry.js";
+import { project3D, planePoint, satelliteFrame } from "../frontend/scene3d.js";
+
+const results = [];
+const close = (actual, expected, tolerance = 0.000001) => {
+  if (!Number.isFinite(actual) || Math.abs(actual - expected) > tolerance) throw Error(`${actual} != ${expected}`);
+};
+const test = (name, callback) => { callback(); results.push(name); };
+const origin = { latitude: 51, longitude: 7 };
+const polygon = [[-2, -3], [2, -3], [2, 3], [-2, 3]].map(([x, y]) => geographicPoint({ x, y }, origin));
+const area = { polygon, height: 6, tilt: 30, azimuth: 0 };
+
+test("North is up, east is right and height is up, not mirrored", () => {
+  const camera={yaw:0,pitch:40*Math.PI/180,scale:3,target:{x:0,y:0,z:0}};
+  const center=project3D({x:0,y:0,z:0},camera,640,480);
+  const north=project3D({x:0,y:10,z:0},camera,640,480);
+  const east=project3D({x:10,y:0,z:0},camera,640,480);
+  const up=project3D({x:0,y:0,z:10},camera,640,480);
+  if (!(north.y<center.y && east.x>center.x && up.y<center.y)) throw Error("Mirrored scene");
+  if (!(north.depth<center.depth && up.depth>center.depth)) throw Error("Wrong painter order");
+});
+test("Satellite image orientation is preserved at every camera bearing", () => {
+  const frame=satelliteFrame(polygon.map(p=>localPoint(p,origin)),origin);
+  for(const yaw of [-170,-35,0,90,170]) {
+    const camera={yaw:yaw*Math.PI/180,pitch:40*Math.PI/180,scale:3,target:{x:0,y:0,z:0}};
+    const [nw,ne,sw]=frame.corners.map(p=>project3D({...p,z:0},camera,640,480));
+    const determinant=(ne.x-nw.x)*(sw.y-nw.y)-(ne.y-nw.y)*(sw.x-nw.x);
+    if (!(determinant>0)) throw Error(`Satellite reflection at ${yaw}`);
+  }
+});
+
+for (const azimuth of [0, 90, 180, 270, 45]) test(`Surface heights at ${azimuth} degrees`, () => {
+  const model = { ...area, azimuth }, profile = surfaceProfile(model), vertices = surfaceVertices(model, origin);
+  const angle = azimuth * Math.PI / 180;
+  const span = 4 * Math.abs(Math.sin(angle)) + 6 * Math.abs(Math.cos(angle));
+  close(profile.span, span);
+  close(Math.min(...vertices.map(p => p.z)), 6);
+  close(Math.max(...vertices.map(p => p.z)), 6 + span * Math.tan(Math.PI / 6));
+  vertices.forEach((p, i) => {
+    close(p.x, localPoint(polygon[i], origin).x); close(p.y, localPoint(polygon[i], origin).y);
+  });
+});
+for (const azimuth of [0, 90, 180, 270]) test(`Vertical plane at ${azimuth} degrees`, () => {
+  const vertices = surfaceVertices({ ...area, azimuth, tilt: 90, vertical_height: 2.5 }, origin);
+  vertices.forEach(p => close(p.x * Math.sin(azimuth * Math.PI / 180) + p.y * Math.cos(azimuth * Math.PI / 180), 0));
+  close(Math.min(...vertices.map(p => p.z)), 6); close(Math.max(...vertices.map(p => p.z)), 8.5);
+});
+test("Missing vertical extent does not invent a surface", () => {
+  if (surfaceVertices({ ...area, tilt: 90 }, origin) !== null) throw Error("Missing extent accepted");
+});
+test("Unrealistic upper edge does not render as a valid surface", () => {
+  if (surfaceVertices({ ...area, tilt: 89.99 }, origin) !== null) throw Error("Unrealistic upper edge accepted");
+});
+test("Date-line geometry uses the local footprint", () => {
+  const reference = { latitude: 51, longitude: 179.99999 };
+  const outline = [[-20, -10], [20, -10], [20, 10], [-20, 10]].map(([x, y]) => geographicPoint({ x, y }, reference));
+  close(Math.abs(areaCenter(outline).longitude), 179.99999);
+  close(surfaceProfile({ ...area, polygon: outline, azimuth: 90 }).span, 40);
+});
+for (const yaw of [-170, -35, 0, 90, 170]) for (const pitch of [20, 40, 85])
+  test(`Projection/inverse at yaw ${yaw}, pitch ${pitch}`, () => {
+    const camera = { yaw: yaw * Math.PI / 180, pitch: pitch * Math.PI / 180, scale: 4.25, target: { x: -8, y: 11, z: 6 } };
+    for (const point of [{ x: 4, y: 7, z: 0 }, { x: -30, y: 52, z: 20 }, { x: 100, y: -15, z: 6.5 }]) {
+      const restored = planePoint(project3D(point, camera, 900, 600), point.z, camera, 900, 600);
+      close(restored.x, point.x); close(restored.y, point.y); close(restored.z, point.z);
+    }
+  });
+test("Geometry helpers do not mutate the model", () => {
+  const before = JSON.stringify(area);
+  surfaceProfile(area); surfaceVertices(area, origin);
+  if (JSON.stringify(area) !== before) throw Error("Model mutated");
+});
+test("Satellite image footprint contains the site and uses ground level", () => {
+  const points = [{ x: -200, y: -150 }, { x: 200, y: 150 }];
+  const frame = satelliteFrame(points, origin);
+  if (frame.zoom < 0 || frame.zoom > 20 || !Number.isInteger(frame.zoom)) throw Error("Invalid satellite zoom");
+  const [a, b, c] = frame.corners;
+  if (a.x >= -200 || b.x <= 200 || a.y <= 150 || c.y >= -150) throw Error("Site outside image footprint");
+  [a, b, c].forEach(p => close(p.z, 0));
+  close(a.y, b.y); close(a.x, c.x);
+});
+test("Satellite coordinates remain local across the date line", () => {
+  const frame = satelliteFrame([{ x: -300, y: -200 }, { x: 300, y: 200 }], { latitude: 51, longitude: 179.9999 });
+  if (frame.corners.some(p => Math.abs(p.x) > 2000 || Math.abs(p.y) > 2000)) throw Error("Nonlocal satellite footprint");
+});
+window.geometryTestResults = { passed: results.length, tests: results };
+document.getElementById("results").textContent = `${results.length} tests passed\n\n${results.join("\n")}`;
+</script>
+</html>

@@ -127,15 +127,10 @@ class DwdMosmixClient:
             rad_s = rad[i].strip()
             rrad_s = rrad[i].strip()
 
-            if rad_s == "-" or rad_s == "":
-                rad_v = 0.0
-            else:
-                rad_v = float(rad_s)
-
-            if rrad_s == "-" or rrad_s == "":
-                rrad_v = 0.0
-            else:
-                rrad_v = float(rrad_s)
+            if rad_s in ("-", "") or rrad_s in ("-", ""):
+                continue
+            rad_v = float(rad_s)
+            rrad_v = float(rrad_s)
 
             # Symcon: rad_total = round(rad * rrad/100)
             rad_total = (rad_v * rrad_v) / 100.0

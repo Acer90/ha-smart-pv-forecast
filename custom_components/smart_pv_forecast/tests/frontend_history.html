@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<title>Solarstudio history regression tests</title>
+<pre id="results">Tests laufen …</pre>
+<script type="module">
+import { dayTimeline, hourlyPower, loadStringHistory, loadSiteHistory, totalHourlyPower } from "../frontend/history.js";
+import { chartSVG, renderAnalysis, wireChartInteraction, renderForecastDays } from "../frontend/charts.js";
+import { TEXT, infoDetails } from "../frontend/i18n.js";
+const results = [];
+const assert = (value, message = "Assertion failed") => { if (!value) throw Error(message); };
+const close = (value, expected, tolerance = 1e-6) => assert(Math.abs(value - expected) < tolerance, `${value} != ${expected}`);
+const test = async (name, fn) => { await fn(); results.push(name); };
+const day = dayTimeline("2026-06-21", "Europe/Berlin", Date.parse("2026-06-22T00:00Z"));
+const state = (minutes, s, unit = "W") => ({lu:day.start/1000 + minutes*60,s,a:{unit_of_measurement:unit}});
+try {
+await test("Local midnight, complete 24 hour day", () => {
+  assert(new Date(day.start).toISOString() === "2026-06-20T22:00:00.000Z");
+  close(day.end-day.start, 24*3600000);
+});
+await test("Time weighting, not arithmetic event average", () => {
+  const data = hourlyPower([state(0,"100"),state(15,"500"),state(30,"100")], day);
+  close(data.values[0],200); close(data.minutes[0],60);
+});
+await test("kW conversion and historical unit changes", () => {
+  close(hourlyPower([state(0,"0.1","kW"),state(30,"300")],day).values[0],200);
+});
+await test("Unknown intervals are excluded from averages, never counted as zero", () => {
+  const data = hourlyPower([state(0,"100"),state(15,"unavailable"),state(30,"300")],day);
+  close(data.values[0],(100*15+300*30)/45); close(data.minutes[0],45); close(data.values[1],300);
+});
+await test("Missing midnight state stays unknown", () => {
+  const data = hourlyPower([state(15,"100")], day);
+  close(data.values[0],100); close(data.minutes[0],45);
+});
+await test("State before midnight is carried forward", () => {
+  close(hourlyPower([state(-30,"100")],day).values[0],100);
+});
+await test("Current partial hour, future gaps", () => {
+  const partial = dayTimeline("2026-06-21","Europe/Berlin",day.start+90*60000);
+  const data = hourlyPower([state(0,"100"),state(75,"300")],partial);
+  close(data.values[1],200); close(data.minutes[1],30); assert(data.values[2]===null);
+});
+await test("Berlin 13:55 includes hours 11, 12 and current 13, without a UTC two-hour lag", async () => {
+  const now=Date.parse("2026-10-10T11:55:00Z");
+  const timeline=dayTimeline("2026-10-10","Europe/Berlin",now);
+  let request;
+  const data=await loadSiteHistory({callWS:async msg=>{
+    request=msg;
+    return {"sensor.string":[{lu:timeline.start/1000,s:"500",a:{unit_of_measurement:"W"}}]};
+  }},{pv_arrays:[{areas:[{name:"Roof",strings:[{name:"String",power_entity:"sensor.string"}]}]}],inverters:[]},
+    {date:"2026-10-10",timezone:"Europe/Berlin"},now);
+  assert(request.end_time==="2026-10-10T11:55:00.000Z" && data.until===request.end_time);
+  for(const hour of [11,12,13])close(data.strings[0][0].values[hour],500);
+  close(data.strings[0][0].minutes[13],55);
+  assert(data.strings[0][0].values[14]===null);
+});
+await test("Spring DST hour is absent", () => {
+  const spring = dayTimeline("2026-03-29","Europe/Berlin",Date.parse("2026-03-30T12:00Z"));
+  close(spring.end-spring.start,23*3600000);
+  const data = hourlyPower([{lu:spring.start/1000,s:"100",a:{unit_of_measurement:"W"}}],spring);
+  assert(data.values[2]===null); close(data.values[3],100);
+});
+await test("Fall DST double hour is duration weighted", () => {
+  const fall = dayTimeline("2026-10-25","Europe/Berlin",Date.parse("2026-10-26T12:00Z"));
+  close(fall.end-fall.start,25*3600000);
+  const data = hourlyPower([
+    {lu:fall.start/1000,s:"100",a:{unit_of_measurement:"W"}},
+    {lu:fall.start/1000+3*3600,s:"300",a:{unit_of_measurement:"W"}},
+  ],fall);
+  close(data.values[2],200); close(data.minutes[2],120);
+});
+await test("Fractional UTC offset", () => {
+  const india = dayTimeline("2026-06-21","Asia/Kolkata",Date.parse("2026-06-22T12:00Z"));
+  assert(new Date(india.start).toISOString()==="2026-06-20T18:30:00.000Z");
+});
+await test("Half-hour DST repeat keeps 90 minutes in local hour", () => {
+  const fall = dayTimeline("2026-04-05","Australia/Lord_Howe",Date.parse("2026-04-06T12:00Z"));
+  close(fall.end-fall.start,24.5*3600000);
+  const data = hourlyPower([
+    {lu:fall.start/1000,s:"100",a:{unit_of_measurement:"W"}},
+    {lu:fall.start/1000+2*3600,s:"300",a:{unit_of_measurement:"W"}},
+  ],fall);
+  close(data.minutes[1],90); close(data.values[1],(100*60+300*30)/90);
+});
+await test("Empty history and invalid power/unit never fabricate zero", () => {
+  assert(hourlyPower([],day).values.every(v=>v===null));
+  for (const [value,unit] of [["","W"],["unknown","W"],["-10","W"],["1","kWh"],["Infinity","W"]]) {
+    assert(hourlyPower([state(0,value,unit)],day).values[0]===null);
+  }
+  close(hourlyPower([state(0,"0")],day).values[0],0);
+});
+await test("Full noncompressed states supported", () => {
+  close(hourlyPower([{state:"10",last_updated:new Date(day.start).toISOString(),attributes:{unit_of_measurement:"W"}}],day).values[0],10);
+});
+await test("Malformed timestamps fail explicitly", () => {
+  let failed=false;
+  try {hourlyPower([{s:"100",lu:"bad"}],day);} catch {failed=true;}
+  assert(failed);
+});
+const arrays = [{areas:[{name:"Roof",strings:[{name:"MPPT 1",power_entity:"sensor.a"},{name:"MPPT 2",power_entity:"sensor.b"}]},
+  {name:"Other roof",strings:[{name:"Same sensor",power_entity:"sensor.a"}]}]}];
+await test("History request deduplicates entities, keeps separate labels", async () => {
+  let request;
+  const data = await loadStringHistory({callWS:async msg => {request=msg;return { "sensor.a":[state(0,"100")] };}},
+    arrays,{date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  assert(request.entity_ids.length===2 && request.include_start_time_state && !request.minimal_response && !request.no_attributes && !request.significant_changes_only);
+  assert(data[0].length===3 && data[0][2].label==="Other roof / Same sensor");
+  close(data[0][0].values[0],100); assert(data[0][1].values[0]===null);
+});
+await test("No assignments means no history request", async () => {
+  await loadStringHistory({callWS:()=>{throw Error("Unexpected request");}},[{areas:[]}],{},day.end);
+});
+await test("History transport error is not swallowed", async () => {
+  let failed=false;
+  try {await loadStringHistory({callWS:async()=>{throw Error("Recorder disabled");}},arrays,{date:"2026-06-21",timezone:"Europe/Berlin"},day.end);} catch {failed=true;}
+  assert(failed);
+});
+await test("Total inverter power integrates simultaneous states, not separate averages", () => {
+  const total=totalHourlyPower([
+    [state(0,"100"),state(15,"300")],
+    [state(0,"0.2","kW"),state(45,"0.4","kW")],
+  ],day);
+  close(total.values[0],500); close(total.minutes[0],60);
+});
+await test("Total gaps use intersection of recorded intervals", () => {
+  const total=totalHourlyPower([
+    [state(0,"100"),state(15,"unavailable"),state(30,"100")],
+    [state(0,"200"),state(30,"unknown"),state(45,"200")],
+  ],day);
+  close(total.values[0],300); close(total.minutes[0],30); close(total.values[1],300);
+});
+await test("Restart gaps of 2.2 minutes retain 57.8 minutes and aligned inverter stacks", async () => {
+  const data=await loadSiteHistory({callWS:async()=>({
+    "sensor.a":[state(0,"100"),state(11*60+10,"unavailable"),state(11*60+12.2,"300")],
+    "sensor.b":[state(0,"500"),state(11*60+10,"unavailable"),state(11*60+12.2,"700")],
+  })},{pv_arrays:[],inverters:[
+    {name:"A",power_entity:"sensor.a"},{name:"B",power_entity:"sensor.b"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  close(data.total.minutes[11],57.8);
+  const expected=(600*10+1000*47.8)/57.8;
+  close(data.total.values[11],expected);
+  close(data.inverters[0].values[11]+data.inverters[1].values[11],expected);
+  close(data.total.values[12],1000);
+});
+await test("Different inverter gaps average only common valid intervals", async () => {
+  const data=await loadSiteHistory({callWS:async()=>({
+    "sensor.a":[state(0,"100"),state(10,"unavailable"),state(20,"300")],
+    "sensor.b":[state(0,"500"),state(30,"unavailable"),state(40,"700")],
+  })},{pv_arrays:[],inverters:[{name:"A",power_entity:"sensor.a"},{name:"B",power_entity:"sensor.b"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  close(data.total.minutes[0],40);
+  close(data.total.values[0],(600*10+800*10+1000*20)/40);
+  for(const inverter of data.inverters)close(inverter.minutes[0],40);
+  close(data.inverters.reduce((sum,inverter)=>sum+inverter.values[0],0),data.total.values[0]);
+});
+await test("Total averages repeated DST hour and clips future hours", () => {
+  const fall=dayTimeline("2026-10-25","Europe/Berlin",Date.parse("2026-10-25T02:00Z"));
+  const states=[
+    {lu:fall.start/1000,s:"100",a:{unit_of_measurement:"W"}},
+    {lu:fall.start/1000+3*3600,s:"300",a:{unit_of_measurement:"W"}},
+  ];
+  const total=totalHourlyPower([states,states],fall);
+  close(total.values[2],400); close(total.minutes[2],120); assert(total.values[3]===null);
+});
+await test("String and inverter history share one bounded deduplicated request", async () => {
+  let calls=0,request;
+  const data=await loadSiteHistory({callWS:async msg=>{
+    calls++;request=msg;return {"sensor.a":[state(0,"100")],"sensor.b":[state(0,"200")]};
+  }},{pv_arrays:arrays,inverters:[{name:"WR 1",power_entity:"sensor.a"},{name:"WR 2",power_entity:"sensor.b"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.start+90*60000);
+  assert(calls===1 && request.entity_ids.length===2 && data.totalStatus===null);
+  assert(Date.parse(request.end_time)===day.start+90*60000);
+  close(data.total.values[0],300); close(data.total.minutes[1],30);
+});
+await test("Unconfigured, incomplete and duplicate inverter assignments never fake totals", async () => {
+  for (const [inverters,status] of [
+    [[],"unconfigured"],
+    [[{power_entity:"sensor.a"},{power_entity:""}],"incomplete"],
+    [[{power_entity:"sensor.a"},{power_entity:"sensor.a"}],"duplicate"],
+  ]) {
+    const data=await loadSiteHistory({callWS:async()=>({"sensor.a":[state(0,"100")]})},
+      {pv_arrays:[],inverters},{date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+    assert(data.total===null && data.totalStatus===status);
+  }
+});
+await test("One inverter without history keeps total unknown", async () => {
+  const data=await loadSiteHistory({callWS:async()=>({"sensor.a":[state(0,"100")]})},
+    {pv_arrays:[],inverters:[{power_entity:"sensor.a"},{power_entity:"sensor.b"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  assert(data.total.values.every(v=>v===null));
+});
+await test("Arrays receive only their own string sensors; inverter sensors supply the total", async () => {
+  let calls=0;
+  const data=await loadSiteHistory({callWS:async msg=>{
+    calls++;assert(msg.entity_ids.length===3);
+    return {"sensor.a":[state(0,"100")],"sensor.b":[state(0,"0.2","kW")],"sensor.wr":[state(0,"900")]};
+  }},{pv_arrays:[
+    {areas:[{name:"East",strings:[{name:"MPPT 1",power_entity:"sensor.a"}]}],inverter_id:"wr"},
+    {areas:[{name:"West",strings:[{name:"MPPT 2",power_entity:"sensor.b"}]}],inverter_id:"wr"}],
+    inverters:[{id:"wr",name:"Shared inverter",power_entity:"sensor.wr"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  assert(calls===1);
+  close(data.strings[0][0].values[8],100);close(data.strings[1][0].values[8],200);
+  assert(data.strings[0][0].label==="East / MPPT 1");
+  assert(data.strings[1][0].label==="West / MPPT 2");
+  close(data.total.values[8],900);
+  assert(!("arrayMeasurements" in data));
+});
+await test("Arrays without strings never substitute a shared inverter curve", async () => {
+  const data=await loadSiteHistory({callWS:async()=>({"sensor.a":[state(0,"1000")]})},
+    {pv_arrays:[{areas:[],inverter_id:"a"},{areas:[],inverter_id:"a"}],
+     inverters:[{id:"a",name:"Shared inverter",power_entity:"sensor.a"}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  assert(data.strings.every(strings=>strings.length===0));
+  close(data.total.values[12],1000);
+});
+await test("Empty string assignments do not request nonexistent inverter sensors", async () => {
+  const data=await loadSiteHistory({callWS:()=>{throw Error("No sensor should be queried");}},
+    {pv_arrays:[{areas:[],inverter_id:""},{areas:[],inverter_id:"missing"},{areas:[],inverter_id:"a"}],
+     inverters:[{id:"a",name:"Sensorless",power_entity:""}]},
+    {date:"2026-06-21",timezone:"Europe/Berlin"},day.end);
+  assert(data.strings.every(strings=>strings.length===0));
+  assert(data.totalStatus==="incomplete");
+});
+await test("Information expanders start closed, escape content and retain accessible help IDs", () => {
+  const payload="<script>Not executable</"+"script>";
+  const root=document.createElement("div");root.innerHTML=infoDetails("Help",payload,"sensor-help");
+  assert(!root.querySelector("details").open && !root.querySelector("script"));
+  assert(root.querySelector("#sensor-help").textContent===payload);
+});
+await test("Multi-day bars use exact configured thresholds and shared scale", () => {
+  const root=document.createElement("div");
+  root.innerHTML=renderForecastDays([
+    {date:"2026-06-21",shaded_wh:47000,covered_hours:24,expected_hours:24},
+    {date:"2026-06-22",shaded_wh:72900,covered_hours:24,expected_hours:24},
+    {date:"2026-06-23",shaded_wh:10000,covered_hours:12,expected_hours:24},
+    {date:"2026-06-24",shaded_wh:null,covered_hours:0,expected_hours:24},
+  ],TEXT.de,"de",{forecast_low_kwh:15,forecast_high_kwh:25});
+  const fill=root.querySelector(".forecast-fill");
+  close(parseFloat(fill.style.width),47/75*100,0.0001);
+  close(parseFloat(fill.querySelector(".forecast-red").style.width),15/47*100,0.0001);
+  close(parseFloat(fill.querySelector(".forecast-orange").style.width),10/47*100,0.0001);
+  close(parseFloat(fill.querySelector(".forecast-green").style.width),22/47*100,0.0001);
+  assert(root.textContent.includes("≥ 10") && root.textContent.includes("Keine Daten"));
+  assert(root.querySelectorAll(".forecast-row").length===4);
+  assert(!root.innerHTML.includes("Stunden mit Daten") && !root.innerHTML.includes("24/24"));
+  const unknown=root.querySelectorAll(".forecast-fill")[3];
+  close(parseFloat(unknown.style.width),0);
+});
+await test("Threshold settings change exact segment boundaries", () => {
+  const root=document.createElement("div");
+  root.innerHTML=renderForecastDays([{date:"2026-06-21",shaded_wh:30000,covered_hours:24,expected_hours:24}],
+    TEXT.en,"en",{forecast_low_kwh:5,forecast_high_kwh:10});
+  const fill=root.querySelector(".forecast-fill");
+  close(parseFloat(fill.querySelector(".forecast-red").style.width),5/30*100,0.0001);
+  close(parseFloat(fill.querySelector(".forecast-orange").style.width),5/30*100,0.0001);
+  close(parseFloat(fill.querySelector(".forecast-green").style.width),20/30*100,0.0001);
+  assert(root.textContent.includes("5–10 kWh"));
+});
+await test("True zero forecast differs from absent data and isolated forecast points stay visible", () => {
+  const root=document.createElement("div");
+  root.innerHTML=renderForecastDays([
+    {date:"2026-06-21",shaded_wh:0,covered_hours:24,expected_hours:24},
+    {date:"2026-06-22",shaded_wh:null,covered_hours:0,expected_hours:24},
+  ],TEXT.de,"de");
+  assert(root.querySelectorAll(".forecast-value")[0].textContent.trim()==="0,0 kWh");
+  assert(root.querySelectorAll(".forecast-value")[1].textContent.includes(TEXT.de.forecastMissing));
+  root.innerHTML=chartSVG([{values:[100,...Array(23).fill(null)],color:"#2684ff"}],100,"W","Test","test");
+  assert(root.querySelectorAll("circle").length===1);
+});
+await test("Charts include measurement scale, table, accessible tooltip and isolated points", () => {
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[{
+    name:"Array",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    strings:[{label:"Roof / <MPPT>",values:[2000,...Array(23).fill(null)],minutes:[60,...Array(23).fill(0)],elapsedMinutes:Array(24).fill(60)}],
+  }]};
+  const root=document.createElement("div"); root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  assert(root.textContent.includes("2000") && root.textContent.includes("Roof / <MPPT>"));
+  assert(!root.querySelector("mppt") && root.querySelectorAll("circle").length===1);
+  wireChartInteraction(root,data,TEXT.de,"de");
+  root.querySelector('[data-chart="0"][data-hour="0"]').dispatchEvent(new Event("focusin",{bubbles:true}));
+  assert(root.querySelector('[data-tooltip="0"]').textContent.includes("2.000 W"));
+});
+await test("Whole-site power card replaces reduction chart and exposes total measurement", () => {
+  const total={name:"Total",covered_hours:24,baseline_wh:4000,shaded_wh:2000,reduction_percent:50,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:4000,shaded_w:2000,reduction_percent:50})),
+    measurement:{values:Array(24).fill(3000),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],total,arrays:[{...total,name:"Array",measurement:null}]};
+  const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  assert(!root.querySelector('[data-chart="reduction"]') && root.querySelector('[data-chart="total"]'));
+  assert(root.querySelector(".total-analysis").textContent.includes(TEXT.de.measuredTotal));
+  assert(!root.textContent.includes("Stunden mit Daten") && !root.textContent.includes("24/24"));
+  wireChartInteraction(root,data,TEXT.de,"de");
+  root.querySelector('[data-chart="total"][data-hour="8"]').dispatchEvent(new Event("focusin",{bubbles:true}));
+  assert(root.querySelector('[data-tooltip="total"]').textContent.includes("3.000 W"));
+});
+await test("Total measurements are stacked per inverter with correct scale and no measured line or incomplete bars", () => {
+  const measured=(label,value)=>({label,inverter:true,values:Array(24).fill(value),
+    minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)});
+  const total={name:"Total",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    inverters:[measured("East",300),measured("West",500)],
+    measurement:{values:Array(24).fill(800),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
+  total.measurement.values[9]=null;
+  total.inverters[1].values[9]=null;
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],total,
+    arrays:[{...total,name:"Roof",inverters:[],measurement:null}]};
+  const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  const chart=root.querySelector(".total-analysis .chart");
+  assert(chart.querySelectorAll("path").length===2);
+  assert([...chart.querySelectorAll("path")].every(path => path.getAttribute("stroke-width")==="1.5"));
+  assert(chart.querySelectorAll("path")[1].getAttribute("stroke")==="#1976d2");
+  assert(root.querySelector(".total-analysis .legend").innerHTML.includes("--color:#1976d2"));
+  assert([...root.querySelectorAll(".charts .chart path")].every(path => path.getAttribute("stroke-width")==="2.8"));
+  assert(chart.querySelectorAll(".measured-bar").length===46);
+  assert(!chart.querySelector('[data-bar-hour="9"]'));
+  const bars=[...chart.querySelectorAll('[data-bar-hour="8"]')];
+  close(Number(bars[0].getAttribute("height")),196*300/800);
+  close(Number(bars[1].getAttribute("height")),196*500/800);
+  close(Number(bars[1].getAttribute("y")),14);
+  assert(bars[0].getAttribute("fill")!==bars[1].getAttribute("fill"));
+  wireChartInteraction(root,data,TEXT.de,"de");
+  chart.querySelector('[data-hour="8"]').dispatchEvent(new Event("focusin",{bubbles:true}));
+  const text=root.querySelector('[data-tooltip="total"]').textContent;
+  assert(text.includes("East: 300 W")&&text.includes("West: 500 W")&&text.includes("800 W"));
+});
+await test("Partial measured hours show power without coverage annotations in tooltip and table", () => {
+  const measurement={label:"MPPT",values:Array(24).fill(500),minutes:Array(24).fill(60),
+    elapsedMinutes:Array(24).fill(60)};
+  measurement.minutes[11]=57.8;
+  const array={name:"Roof",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    strings:[measurement]};
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[array]};
+  const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  assert(!root.querySelector('p.muted[role="status"]'));
+  assert(root.querySelectorAll("tbody tr")[11].textContent.includes("500 W"));
+  assert(!root.textContent.includes("Unvollständige Messung") && !root.textContent.includes("Messminuten"));
+  assert(!root.querySelector("tbody small"));
+  wireChartInteraction(root,data,TEXT.de,"de");
+  root.querySelector('[data-hour="11"]').dispatchEvent(new Event("focusin",{bubbles:true}));
+  const tooltip=root.querySelector(".chart-tooltip").textContent;
+  assert(tooltip.includes("500 W")&&!tooltip.includes(" min)")&&!tooltip.includes("Unvollständige Messung"));
+});
+await test("History retrieval cutoff is displayed in HA local time, not UTC", () => {
+  const array={name:"Roof",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20}))};
+  const root=document.createElement("div");
+  root.innerHTML=renderAnalysis({date:"2026-10-10",timezone:"Europe/Berlin",sources:[],arrays:[array],
+    history_until:"2026-10-10T11:55:00Z"},TEXT.de,"de");
+  assert(root.textContent.includes("Messwerte abgerufen bis: 13:55"));
+});
+await test("Array legends, tables and tooltips show individual strings, never inverter power", () => {
+  const array={name:"Roof",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    strings:[
+      {label:"Roof / MPPT <1>",values:Array(24).fill(300),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)},
+      {label:"Roof / MPPT 2",values:Array(24).fill(500),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}],
+    inverter_measurement:{label:"WR East",inverter:true,shared:true,
+      values:Array(24).fill(1200),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[array]};
+  const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  const tooltip=root.querySelector('[data-tooltip="0"]');
+  assert(tooltip.hidden && root.querySelectorAll("details.info[open]").length===0 && !root.querySelector("mppt"));
+  assert(root.querySelector(".legend").textContent.includes("Gemessen · PV-String: Roof / MPPT <1>"));
+  assert(root.querySelector(".legend").textContent.includes("Gemessen · PV-String: Roof / MPPT 2"));
+  assert(root.querySelector("table").textContent.includes("300 W") && root.querySelector("table").textContent.includes("500 W"));
+  assert(!root.textContent.includes("WR East") && !root.textContent.includes("1.200 W"));
+  wireChartInteraction(root,data,TEXT.de,"de");
+  root.querySelector('[data-chart="0"][data-hour="8"]').dispatchEvent(new Event("focusin",{bubbles:true}));
+  assert(!tooltip.hidden && tooltip.textContent.includes("300 W") && tooltip.textContent.includes("500 W"));
+  assert(!tooltip.textContent.includes("1.200 W"));
+});
+document.getElementById("results").textContent=`${results.length} tests passed\n${results.join("\n")}`;
+window.testResults={passed:results.length};
+} catch(error) {
+  document.getElementById("results").textContent=`FAILED after ${results.length}: ${error.stack}`;
+  window.testResults={passed:results.length,error:error.message};
+  throw error;
+}
+</script>
+</html>

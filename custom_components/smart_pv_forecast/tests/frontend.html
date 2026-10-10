@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart PV configurator test fixture</title>
+<style>
+  html,body{margin:0;height:100%;--primary-text-color:#222;--primary-background-color:#fafafa;--card-background-color:#fff;--divider-color:#bbb;--primary-color:#0288d1;--secondary-text-color:#555}
+  smart-pv-configurator{display:block;height:100%}
+</style>
+<smart-pv-configurator></smart-pv-configurator>
+<script type="module">
+  import { project, unproject, surfaceProfile } from "../frontend/configurator.js";
+  window.testProjection = { project, unproject, surfaceProfile };
+  const initial = {
+    entry_id: "test-site", name: "Test PV", latitude: 51, longitude: 7,
+    revision: "initial", shading_objects: [], inverters: [],
+    settings: {damping_morning:0,damping_evening:0,horizon:0,open_meteo_forecast_days:7,daily_yield_sensor_days:4,inverter_size:null},
+    pv_arrays: [{
+      name: "Dach", peak: 5000, azimuth: 180, tilt: 30, height: 6,
+      latitude: 51, longitude: 7, mounting_type: "roof_parallel", areas: [],
+    }],
+  };
+  window.testSite = JSON.parse(localStorage.getItem("smart-pv-test") || "null") || initial;
+  window.testCalls = [];
+  window.testFailSave = false;
+  window.testFailPreview = false;
+  document.querySelector("smart-pv-configurator").hass = {
+    language: "de",
+    states: {
+      "sensor.test_power": {state:"3200",attributes:{unit_of_measurement:"W",friendly_name:"Test Wechselrichterleistung"}},
+      "sensor.test_energy": {state:"12345",attributes:{unit_of_measurement:"kWh",friendly_name:"Test Gesamtertrag"}},
+      "sensor.test_string_1": {state:"0.8",attributes:{unit_of_measurement:"kW",friendly_name:"MPPT 1"}},
+      "sensor.test_string_2": {state:"600",attributes:{unit_of_measurement:"W",friendly_name:"MPPT 2"}},
+    },
+    async callWS(msg) {
+      window.testCalls.push(structuredClone(msg));
+      if (msg.type === "smart_pv_forecast/sites") return [structuredClone(window.testSite)];
+      if (msg.type === "history/history_during_period") {
+        if (window.testFailHistory) throw new Error("Test history failure");
+        if (window.testEmptyHistory) return {};
+        const start = Date.parse(msg.start_time) / 1000;
+        return Object.fromEntries(msg.entity_ids.map((entity, index) => [entity, [
+          {lu:start,s:"0",a:{unit_of_measurement:"W"}},
+          {lu:start+8*3600,s:entity.endsWith("1") ? "0.8" : "600",a:{unit_of_measurement:entity.endsWith("1") ? "kW" : "W"}},
+          {lu:start+16*3600,s:"0",a:{unit_of_measurement:"W"}},
+        ]]));
+      }
+      if (msg.type === "smart_pv_forecast/shadow_preview") {
+        if (window.testFailPreview) throw new Error("Test preview failure");
+        // Deliberately mocked sun data; Python tests verify real astronomy and projection.
+        const local = msg.when || "2026-06-21T12:00";
+        const hour = Number(local.slice(11,13)) + Number(local.slice(14,16))/60;
+        const elevation = 60 * Math.sin((hour - 6) / 12 * Math.PI);
+        const azimuth = (90 + (hour - 6) * 15 + 360) % 360;
+        const projectPoint = (p) => {
+          const length = Math.max(0, p.height - msg.height) / Math.tan(elevation*Math.PI/180);
+          return {latitude:p.latitude-length*Math.cos(azimuth*Math.PI/180)/6371000*180/Math.PI,
+            longitude:p.longitude-length*Math.sin(azimuth*Math.PI/180)/6371000/Math.cos(p.latitude*Math.PI/180)*180/Math.PI};
+        };
+        const shadows = elevation <= 0 ? [] : msg.shading_objects.filter((o) =>
+          o.line.some((p) => p.height > msg.height)
+        ).map((o,index) => {
+          const day = local.slice(5,10);
+          const leaves = o.foliage_mode === "leaf_on" || (o.foliage_mode === "auto"
+            && (o.leaf_on < o.leaf_off ? o.leaf_on <= day && day < o.leaf_off
+              : day >= o.leaf_on || day < o.leaf_off));
+          return {index,name:o.name,solid:o.solid,
+            reduction:o.solid ? 1-o.transmission : leaves ? o.reduction_leaf_on : o.reduction_leaf_off,
+            polygons:o.line.slice(1).map((b,i)=>[o.line[i],b,projectPoint(b),projectPoint(o.line[i])])};
+        });
+        return {time:local+":00+02:00",local_time:local,timezone:"Europe/Berlin",
+          height:msg.height,position:msg.position,sun:{azimuth,elevation},shadows,truncated:false};
+      }
+      if (msg.type === "smart_pv_forecast/analysis") {
+        const arrays = window.testSite.pv_arrays.map((array) => {
+          const hours = Array.from({length:24}, (_, hour) => {
+            const base = Math.max(0, Math.sin((hour - 6) / 12 * Math.PI)) * array.peak;
+            const factor = window.testSite.shading_objects.length ? 0.6 : 1;
+            return {hour, baseline_w:base, shaded_w:base*factor,
+              baseline_wh:base, shaded_wh:base*factor, reduction_percent:base ? (1-factor)*100 : 0};
+          });
+          return {name:array.name, hours, covered_hours:24,
+            baseline_wh:hours.reduce((s,h)=>s+h.baseline_wh,0),
+            shaded_wh:hours.reduce((s,h)=>s+h.shaded_wh,0),
+            reduction_percent:window.testSite.shading_objects.length ? 40 : 0};
+        });
+        const date = new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+        const totalHours = Array.from({length:24},(_,hour)=>{
+          const values=arrays.map(array=>array.hours[hour]);
+          const baseline_w=values.reduce((sum,h)=>sum+h.baseline_w,0);
+          const shaded_w=values.reduce((sum,h)=>sum+h.shaded_w,0);
+          return {hour,baseline_w,shaded_w,baseline_wh:baseline_w,shaded_wh:shaded_w,
+            reduction_percent:baseline_w ? 100*(1-shaded_w/baseline_w) : 0};
+        });
+        const total={name:"Total",hours:totalHours,covered_hours:24,
+          baseline_wh:arrays.reduce((sum,array)=>sum+array.baseline_wh,0),
+          shaded_wh:arrays.reduce((sum,array)=>sum+array.shaded_wh,0),
+          reduction_percent:window.testSite.shading_objects.length ? 40 : 0};
+        const forecast_days=Array.from({length:7},(_,index)=>({
+          date:new Date(Date.parse(`${date}T12:00:00Z`)+index*86400000).toISOString().slice(0,10),
+          baseline_wh:[47000,55700,72900,10000,69000,31800,null][index],
+          shaded_wh:[47000,55700,72900,10000,69000,31800,null][index],
+          covered_hours:index===6 ? 0 : index===3 ? 12 : 24,expected_hours:24,
+        }));
+        return {date, timezone:"Europe/Berlin", revision:window.testSite.revision, total, forecast_days,
+          sources:["Test forecast"], arrays, generated_at:new Date().toISOString()};
+      }
+      if (window.testFailSave) throw new Error("Test save failure");
+      if (msg.revision !== window.testSite.revision) throw new Error("Conflict");
+      const site = { ...window.testSite, pv_arrays: msg.pv_arrays, shading_objects: msg.shading_objects,
+        inverters:msg.inverters, settings:msg.settings, revision: String(Date.now()),
+        geometry_required:msg.pv_arrays.some(a=>a.areas.some(p=>p.tilt===90&&p.vertical_height==null)) };
+      window.testSite = structuredClone(site);
+      localStorage.setItem("smart-pv-test", JSON.stringify(site));
+      return structuredClone(site);
+    },
+  };
+</script>
+</html>

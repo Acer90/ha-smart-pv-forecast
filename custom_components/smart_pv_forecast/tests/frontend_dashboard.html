@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solarprognose dashboard regression tests</title>
+<style>#results { white-space:pre-wrap; overflow-wrap:anywhere; } #demo { display:grid; gap:12px; }</style>
+<pre id="results">Tests laufen …</pre>
+<div id="demo" style="max-width:390px"></div>
+<script type="module">
+import { dashboardData } from "../frontend/dashboard.js";
+import { updateRenderedContent } from "../frontend/render.js";
+import { renderForecastDays, powerCard } from "../frontend/charts.js";
+import { TEXT } from "../frontend/i18n.js";
+const results=[];
+const assert=(value,message="Assertion failed")=>{if(!value)throw Error(message);};
+const test=async(name,fn)=>{await fn();results.push(name);};
+const date=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+const hours=Array.from({length:24},(_,hour)=>({hour,baseline_w:1000,shaded_w:800,reduction_percent:20}));
+const site={entry_id:"test",name:"Test PV",revision:"r1",settings:{forecast_low_kwh:15,forecast_high_kwh:25},
+  pv_arrays:[{name:"Roof",areas:[{name:"East",strings:[
+    {name:"MPPT 1",power_entity:"sensor.string_1"},{name:"MPPT 2",power_entity:"sensor.string_2"}]}]}],
+  inverters:[{name:"WR",power_entity:"sensor.wr"}]};
+const array={name:"Roof",hours,baseline_wh:24000,shaded_wh:19200,reduction_percent:20,covered_hours:24};
+const analysis={date,timezone:"Europe/Berlin",revision:"r1",sources:[],arrays:[array],total:{...array,name:"Total"},
+  forecast_days:[{date,shaded_wh:19200,covered_hours:24,expected_hours:24}]};
+function mock({sites=[site],failHistory=false,revision="r1"}={}) {
+  const calls=[];
+  return {language:"de",connection:{},calls,async callWS(msg){
+    calls.push(msg);
+    if(msg.type==="smart_pv_forecast/dashboard_sites")return structuredClone(sites);
+    if(msg.type==="smart_pv_forecast/dashboard_analysis")return {...structuredClone(analysis),revision};
+    if(msg.type==="history/history_during_period"){
+      if(failHistory)throw Error("Recorder unavailable");
+      return Object.fromEntries(msg.entity_ids.map(entity=>[entity,[{
+        lu:Date.parse(msg.start_time)/1000,s:entity==="sensor.wr"?"900":entity.endsWith("1")?"300":"500",
+        a:{unit_of_measurement:"W"}}]]));
+    }
+    throw Error("Unexpected command");
+  }};
+}
+const settle=async(card)=>{for(let i=0;i<200;i++){
+  if(card.result||card.shadowRoot.querySelector('[role="alert"]'))return;
+  await new Promise(resolve=>setTimeout(resolve,10));
+}throw Error("Card did not finish loading");};
+try {
+await test("Both cards are discoverable and have visual editors",()=>{
+  assert(TEXT.de.title==="Solarprognose" && TEXT.en.title==="Solar forecast");
+  for(const tag of ["smart-pv-yield-card","smart-pv-power-card"]){
+    const cls=customElements.get(tag);
+    assert(cls&&window.customCards.some(card=>card.type===tag));
+    assert(window.customCards.find(card=>card.type===tag).name.startsWith("Solarprognose · "));
+    assert(cls.getConfigElement().tagName==="SMART-PV-CARD-EDITOR");
+    assert(cls.getStubConfig().type===`custom:${tag}`);
+  }
+});
+await test("Yield does not query history; parallel power cards share one history request",async()=>{
+  const hass=mock();
+  await dashboardData(hass,{type:"custom:smart-pv-yield-card"});
+  assert(hass.calls.length===2);
+  const [a,b]=await Promise.all([
+    dashboardData(hass,{type:"custom:smart-pv-power-card",array:0}),
+    dashboardData(hass,{type:"custom:smart-pv-power-card",array:"total"})]);
+  assert(hass.calls.filter(c=>c.type==="history/history_during_period").length===1);
+  assert(a.data.arrays[0].strings.length===2&&a.data.arrays[0].strings[0].values[0]===300);
+  assert(b.data.total.measurement.values[0]===900);
+  assert(b.data.total.inverters[0].values[0]===900);
+  assert(!a.data.arrays[0].inverter_measurement);
+});
+await test("Multiple sites require explicit selection and missing sites fail visibly",async()=>{
+  for(const config of [{},{entry_id:"missing"}]){
+    let failed=false;
+    try{await dashboardData(mock({sites:[site,{...site,entry_id:"second"}]}),{type:"custom:smart-pv-yield-card",...config});}
+    catch(error){failed=!!error.message;}
+    assert(failed);
+  }
+});
+await test("Revision mismatch never displays a stale forecast as current",async()=>{
+  let failed=false;
+  try{await dashboardData(mock({revision:"old"}),{type:"custom:smart-pv-yield-card"});}
+  catch(error){failed=!!error.message;}
+  assert(failed);
+});
+await test("History failures retain forecasts with explicit error",async()=>{
+  const data=await dashboardData(mock({failHistory:true}),{type:"custom:smart-pv-power-card"});
+  assert(data.data.historyError.includes("Recorder unavailable"));
+  assert(data.data.arrays[0].hours.length===24&&!data.data.total.measurement);
+});
+await test("Separate cards render forecast, total and strings, including touch/keyboard tooltip",async()=>{
+  const hass=mock();
+  for(const [tag,config] of [
+    ["smart-pv-yield-card",{}],["smart-pv-power-card",{array:"total"}],["smart-pv-power-card",{array:0}]]){
+    const card=document.createElement(tag);
+    card.setConfig({type:`custom:${tag}`,...config});card.hass=hass;
+    document.getElementById("demo").append(card);await settle(card);
+    assert(card.result&&!card.shadowRoot.querySelector('[role="alert"]'));
+    if(tag==="smart-pv-yield-card")assert(card.shadowRoot.querySelector(".forecast-overview")&&!card.shadowRoot.querySelector(".chart"));
+    else{
+      const legend=card.shadowRoot.querySelector(".legend").textContent;
+      assert(config.array==="total"?legend.includes("Gemessene Gesamt-PV-Leistung"):legend.includes("East / MPPT 1")&&legend.includes("East / MPPT 2"));
+      assert(config.array==="total"?!!card.shadowRoot.querySelector(".measured-bar"):!card.shadowRoot.querySelector(".measured-bar"));
+      const hit=card.shadowRoot.querySelector('[data-hour="0"]');
+      hit.dispatchEvent(new Event("focusin",{bubbles:true}));
+      assert(!card.shadowRoot.querySelector(".chart-tooltip").hidden);
+      assert(card.shadowRoot.querySelector(".chart-tooltip").textContent.includes(config.array==="total"?"900 W":"300 W"));
+    }
+    assert(card.getCardSize()>0&&card.getGridOptions().columns===12);
+  }
+});
+await test("Visual editor emits selected site and array configuration",async()=>{
+  const editor=customElements.get("smart-pv-power-card").getConfigElement();
+  editor.setConfig({type:"custom:smart-pv-power-card"});editor.hass=mock();
+  document.getElementById("demo").append(editor);
+  for(let i=0;i<100&&!editor.shadowRoot.querySelector("#site");i++)await new Promise(resolve=>setTimeout(resolve,10));
+  let emitted;
+  editor.addEventListener("config-changed",event=>emitted=event.detail.config);
+  const select=editor.shadowRoot.querySelector("#site");select.value="test";select.dispatchEvent(new Event("change"));
+  for(let i=0;i<100&&!editor.shadowRoot.querySelector('#array option[value="0"]');i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert(emitted.entry_id==="test");
+  const arrays=editor.shadowRoot.querySelector("#array");arrays.value="0";arrays.dispatchEvent(new Event("change"));
+  assert(emitted.array===0&&emitted.type==="custom:smart-pv-power-card");
+  editor.remove();
+});
+await test("Invalid card configurations are rejected",()=>{
+  const card=document.createElement("smart-pv-power-card");
+  for(const config of [{type:"wrong"},{type:"custom:smart-pv-power-card",array:-1},{type:"custom:smart-pv-power-card",array:"1"}]){
+    let failed=false;try{card.setConfig(config);}catch(error){failed=true;}assert(failed);
+  }
+});
+await test("Missing array selection is an explicit error, not a different chart",async()=>{
+  const card=document.createElement("smart-pv-power-card");
+  card.setConfig({type:"custom:smart-pv-power-card",array:9});card.hass=mock();
+  document.getElementById("demo").append(card);await settle(card);
+  assert(card.shadowRoot.querySelector('[role="alert"]').textContent.includes("nicht mehr vorhanden"));
+  assert(!card.shadowRoot.querySelector(".chart"));card.remove();
+});
+await test("Card configuration changes discard the previous chart and disconnected cards do not fetch",async()=>{
+  const hass=mock(),card=document.createElement("smart-pv-power-card");
+  card.setConfig({type:"custom:smart-pv-power-card",array:"total"});card.hass=hass;
+  document.getElementById("demo").append(card);await settle(card);
+  card.setConfig({type:"custom:smart-pv-power-card",array:0});await settle(card);
+  assert(card.shadowRoot.querySelector(".legend").textContent.includes("East / MPPT 1"));
+  assert(!card.shadowRoot.querySelector(".legend").textContent.includes("Gemessene Gesamt-PV-Leistung"));
+  card.remove();const count=hass.calls.length;await card.refresh();assert(hass.calls.length===count);
+});
+await test("Refresh preserves expanded help, table and keyboard chart focus",async()=>{
+  const card=document.createElement("smart-pv-power-card");
+  card.setConfig({type:"custom:smart-pv-power-card",array:0});card.hass=mock();
+  document.getElementById("demo").append(card);await settle(card);
+  for(let i=0;i<100&&!card.shadowRoot.querySelector("link").sheet;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  card.shadowRoot.querySelectorAll("details").forEach(node=>node.open=true);
+  card.shadowRoot.querySelector('[data-hour="0"]').focus();
+  assert(card.shadowRoot.activeElement?.dataset.hour==="0","Initial chart focus failed");
+  await card.refresh();
+  assert([...card.shadowRoot.querySelectorAll("details")].every(node=>node.open));
+  assert(card.shadowRoot.activeElement?.dataset.hour==="0");
+  assert(!card.shadowRoot.querySelector(".chart-tooltip").hidden);
+  card.remove();
+});
+await test("Identical card data causes no DOM mutations or chart replacements",async()=>{
+  const card=document.createElement("smart-pv-power-card");
+  const config={type:"custom:smart-pv-power-card",array:0};
+  card.setConfig(config);card.hass=mock();
+  document.getElementById("demo").append(card);await settle(card);
+  const svg=card.shadowRoot.querySelector(".chart");
+  const observer=new MutationObserver(()=>{});
+  observer.observe(card.shadowRoot.querySelector("ha-card"),{subtree:true,attributes:true,childList:true,characterData:true});
+  await card.refresh();
+  assert(observer.takeRecords().length===0);
+  card.setConfig({...config});
+  assert(card.shadowRoot.querySelector(".chart")===svg);
+  observer.disconnect();card.remove();
+});
+await test("Only changed chart content is patched, without touching forecast bars or user state",()=>{
+  const root=document.createElement("div");document.body.append(root);
+  const html=value=>`<section class="forecast"><div style="width:50%"></div></section><article><details><summary>Table</summary><p>${value}</p></details><svg><path d="M0,${value}"></path><rect tabindex="0"></rect></svg></article>`;
+  updateRenderedContent(root,html(1));
+  const forecast=root.querySelector(".forecast"),details=root.querySelector("details"),svg=root.querySelector("svg");
+  details.open=true;root.querySelector("rect").focus();
+  const observer=new MutationObserver(()=>{});observer.observe(forecast,{subtree:true,attributes:true,childList:true,characterData:true});
+  updateRenderedContent(root,html(2));
+  assert(root.querySelector(".forecast")===forecast&&root.querySelector("svg")===svg);
+  assert(root.querySelector("path").getAttribute("d")==="M0,2"&&details.open);
+  assert(observer.takeRecords().length===0);
+  observer.disconnect();root.remove();
+});
+await test("Unchanged yield forecasts do not mutate or restart bars; changed thresholds update in place",async()=>{
+  const card=document.createElement("smart-pv-yield-card");
+  card.setConfig({type:"custom:smart-pv-yield-card"});card.hass=mock();
+  document.getElementById("demo").append(card);await settle(card);
+  const fill=card.shadowRoot.querySelector(".forecast-fill"),details=card.shadowRoot.querySelector("details");
+  details.open=true;
+  const observer=new MutationObserver(()=>{});
+  observer.observe(fill,{subtree:true,attributes:true,childList:true,characterData:true});
+  await card.refresh();
+  assert(observer.takeRecords().length===0&&card.shadowRoot.querySelector(".forecast-fill")===fill);
+  const red=fill.querySelector(".forecast-red"),before=red.style.width;
+  card.hass=mock({sites:[{...site,settings:{forecast_low_kwh:5,forecast_high_kwh:25}}]});
+  await card.refresh();
+  assert(card.shadowRoot.querySelector(".forecast-fill")===fill&&red.style.width!==before);
+  assert(details.open);
+  observer.disconnect();card.remove();
+});
+await test("Compact yield card keeps all seven days and reduces height without hiding missing-data markers",async()=>{
+  const hass=mock(),original=hass.callWS;
+  hass.callWS=async msg=>{
+    const result=await original(msg);
+    if(msg.type==="smart_pv_forecast/dashboard_analysis")result.forecast_days=Array.from({length:7},(_,index)=>{
+      const day=new Date(`${date}T12:00:00Z`);day.setUTCDate(day.getUTCDate()+index);
+      return {date:day.toISOString().slice(0,10),shaded_wh:index===6?null:19200,
+        covered_hours:index===5?12:index===6?0:24,expected_hours:24};
+    });
+    return result;
+  };
+  const card=document.createElement("smart-pv-yield-card");
+  card.setConfig({type:"custom:smart-pv-yield-card"});card.hass=hass;
+  document.getElementById("demo").append(card);await settle(card);
+  for(let i=0;i<100&&!card.shadowRoot.querySelector("link").sheet;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  const normal=card.getBoundingClientRect().height;
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-key")).display!=="none");
+  card.setConfig({type:"custom:smart-pv-yield-card",compact:true});await settle(card);
+  assert(card.shadowRoot.querySelectorAll(".forecast-row").length===7);
+  assert(!card.shadowRoot.querySelector(".forecast-label small"));
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-key")).display==="none");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-overview > .row")).display==="none");
+  assert(card.getBoundingClientRect().height<normal*0.75,`${card.getBoundingClientRect().height} vs ${normal}`);
+  assert(card.shadowRoot.textContent.includes("Teilprognose")&&card.shadowRoot.textContent.includes("Keine Daten"));
+  assert(card.shadowRoot.querySelector(".forecast-track").getAttribute("aria-label").includes(date));
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-track")).height==="15px");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-label")).fontSize==="14px");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-value")).fontSize==="14px");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-label strong")).fontWeight==="400");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-value strong")).fontWeight==="400");
+  card.style.setProperty("--ha-font-size-m","15px");
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-value")).fontSize==="15px");
+  card.style.removeProperty("--ha-font-size-m");
+  assert(card.getCardSize()===3&&card.getGridOptions().rows===5);
+  const fill=card.shadowRoot.querySelector(".forecast-fill");await card.refresh();
+  assert(card.shadowRoot.querySelector(".forecast-fill")===fill);
+  card.setConfig({type:"custom:smart-pv-yield-card",compact:false});await settle(card);
+  assert(getComputedStyle(card.shadowRoot.querySelector(".forecast-key")).display!=="none");
+  card.remove();
+});
+await test("Yield editor persists compact mode while power editor does not offer it",async()=>{
+  for(const type of ["custom:smart-pv-yield-card","custom:smart-pv-power-card"]){
+    const editor=document.createElement("smart-pv-card-editor");
+    editor.setConfig({type,compact:true});editor.hass=mock();
+    document.getElementById("demo").append(editor);
+    for(let i=0;i<100&&!editor.shadowRoot.querySelector("#site");i++)await new Promise(resolve=>setTimeout(resolve,10));
+    const toggle=editor.shadowRoot.querySelector("#compact");
+    if(type.includes("yield")){
+      assert(toggle.checked);let emitted;
+      editor.addEventListener("config-changed",event=>emitted=event.detail.config);
+      toggle.checked=false;toggle.dispatchEvent(new Event("change"));assert(emitted.compact===false);
+    }else assert(!toggle);
+    editor.remove();
+  }
+  let failed=false;
+  try{document.createElement("smart-pv-yield-card").setConfig({type:"custom:smart-pv-yield-card",compact:"true"});}
+  catch(error){failed=true;}assert(failed);
+});
+await test("Forecast rendering respects configured days in both modes and compact labels omit date and today",()=>{
+  const days=Array.from({length:16},(_,index)=>{
+    const day=new Date(`${date}T12:00:00Z`);day.setUTCDate(day.getUTCDate()+index);
+    return {date:day.toISOString().slice(0,10),shaded_wh:1000,covered_hours:24,expected_hours:24};
+  });
+  for(const count of [1,3,10,16])for(const compact of [false,true]){
+    const root=document.createElement("div");
+    root.innerHTML=renderForecastDays(days,TEXT.de,"de",{open_meteo_forecast_days:count},compact);
+    assert(root.querySelectorAll(".forecast-row").length===count);
+    assert(compact?!root.querySelector(".forecast-label small"):root.querySelector(".forecast-label").textContent.includes("Heute"));
+    assert(root.querySelector(".forecast-track").getAttribute("aria-label").includes(date));
+  }
+});
+await test("Hourly tables fit narrow and wide cards without horizontal scrolling, including many sensors",async()=>{
+  const card=document.createElement("smart-pv-power-card");
+  card.setConfig({type:"custom:smart-pv-power-card",array:0});card.hass=mock();
+  document.getElementById("demo").append(card);
+  try{
+    await settle(card);
+    for(let i=0;i<100&&getComputedStyle(card.shadowRoot.querySelector("table")).tableLayout!=="fixed";i++)
+      await new Promise(resolve=>setTimeout(resolve,10));
+    assert(getComputedStyle(card.shadowRoot.querySelector("table")).tableLayout==="fixed");
+    for(const count of [0,2,8]){
+      const strings=Array.from({length:count},(_,i)=>({
+        label:`SehrLangerStringSensornameOhneLeerzeichen${i}`,values:Array(24).fill(12345),
+      }));
+      const host=document.createElement("div");
+      host.innerHTML=powerCard({...array,strings},0,"#00897b",TEXT.de,"de");
+      card.shadowRoot.append(host);
+      host.querySelectorAll("details").forEach(details=>details.open=true);
+      for(const width of [280,390,900]){
+        host.style.width=`${width}px`;
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const wrapper=host.querySelector(".table-scroll"),table=wrapper.querySelector("table");
+        assert(wrapper.scrollWidth<=wrapper.clientWidth+1,`Overflow with ${count} sensors at ${width}px`);
+        assert(table.getBoundingClientRect().width<=wrapper.getBoundingClientRect().width+1);
+        assert(table.querySelectorAll("tbody tr").length===24);
+        assert(table.querySelectorAll("thead th").length===4+count);
+      }
+      host.remove();
+    }
+  }finally{card.remove();}
+});
+document.getElementById("results").textContent=`${results.length} tests passed\n${results.join("\n")}`;
+window.testResults={passed:results.length};
+}catch(error){
+  document.getElementById("results").textContent=`FAILED after ${results.length}: ${error.stack}`;
+  window.testResults={passed:results.length,error:error.message};throw error;
+}
+</script>
+</html>

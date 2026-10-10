@@ -27,12 +27,9 @@ from homeassistant.util import slugify
 from . import ForecastSolarConfigEntry
 from .const import (
     CONF_DAILY_YIELD_SENSOR_DAYS,
-    CONF_ENABLE_SELF_OPTIMIZATION,
-    CONF_PV_ARRAYS,
     DOMAIN,
 )
 from .coordinator import ForecastSolarDataUpdateCoordinator
-from .dwd_icon import _parse_pv_arrays
 
 
 @dataclass(frozen=True)
@@ -176,69 +173,6 @@ async def async_setup_entry(
             )
         )
 
-    if bool(entry.options.get(CONF_ENABLE_SELF_OPTIMIZATION, False)):
-        arrays = _parse_pv_arrays(entry.options.get(CONF_PV_ARRAYS, "[]"))
-        entities.extend(
-            [
-                ForecastSolarAdaptiveOverviewSensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    metric_key="average_factor",
-                    name="Adaptive factor",
-                ),
-                ForecastSolarAdaptiveOverviewSensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    metric_key="average_reference_1000",
-                    name="Adaptive reference 1000 W/m2",
-                    native_unit="W/kWp",
-                ),
-                ForecastSolarAdaptiveOverviewSensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    metric_key="samples_total",
-                    name="Adaptive samples total",
-                ),
-            ]
-        )
-
-        for idx in range(len(arrays)):
-            array_number = idx + 1
-            entities.append(
-                ForecastSolarAdaptiveArraySensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    array_index=idx,
-                    metric_key="factor",
-                    name=f"Adaptive factor array {array_number}",
-                )
-            )
-            entities.append(
-                ForecastSolarAdaptiveArraySensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    array_index=idx,
-                    metric_key="reference_1000",
-                    name=f"Adaptive reference 1000 W/m2 array {array_number}",
-                    native_unit="W/kWp",
-                )
-            )
-            entities.append(
-                ForecastSolarAdaptiveArraySensor(
-                    entry_id=entry.entry_id,
-                    entry_name=entry_name,
-                    coordinator=coordinator,
-                    array_index=idx,
-                    metric_key="samples",
-                    name=f"Adaptive samples array {array_number}",
-                )
-            )
-
     async_add_entities(entities)
 
 
@@ -249,6 +183,10 @@ class ForecastSolarSensorEntity(
 
     entity_description: ForecastSolarSensorEntityDescription
     _attr_has_entity_name = True
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.coordinator.setup_required
 
     def __init__(
         self,
@@ -287,46 +225,6 @@ class ForecastSolarSensorEntity(
         return state
 
 
-class ForecastSolarAdaptiveOverviewSensor(
-    CoordinatorEntity[ForecastSolarDataUpdateCoordinator], SensorEntity
-):
-    """Adaptive optimization overview sensor."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        *,
-        entry_id: str,
-        entry_name: str,
-        coordinator: ForecastSolarDataUpdateCoordinator,
-        metric_key: str,
-        name: str,
-        native_unit: str | None = None,
-    ) -> None:
-        super().__init__(coordinator=coordinator)
-        self._metric_key = metric_key
-        self._attr_name = name
-        self._attr_native_unit_of_measurement = native_unit
-
-        entry_slug = slugify(entry_name) or entry_id
-        suffix = slugify(name)
-        self.entity_id = f"{SENSOR_DOMAIN}.{entry_slug}_{suffix}"
-        self._attr_unique_id = f"{entry_id}_{suffix}"
-        self._attr_device_info = DeviceInfo(
-            entry_type=DeviceEntryType.SERVICE,
-            identifiers={(DOMAIN, entry_id)},
-            manufacturer="DWD (ICON)",
-            model=coordinator.data.account_type.value,
-            name=entry_name,
-            configuration_url="https://www.dwd.de/",
-        )
-
-    @property
-    def native_value(self) -> StateType:
-        snapshot = self.coordinator.get_adaptive_snapshot()
-        value = snapshot.get(self._metric_key)
-        return value
 
 
 class ForecastSolarEnergyInDaysSensor(
@@ -335,6 +233,10 @@ class ForecastSolarEnergyInDaysSensor(
     """Dynamic sensor for energy production N days ahead."""
 
     _attr_has_entity_name = True
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.coordinator.setup_required
 
     def __init__(
         self,
@@ -375,50 +277,6 @@ class ForecastSolarEnergyInDaysSensor(
     def native_value(self) -> StateType:
         return self.coordinator.data.energy_production_in_days(self._offset_days)
 
-
-class ForecastSolarAdaptiveArraySensor(
-    CoordinatorEntity[ForecastSolarDataUpdateCoordinator], SensorEntity
-):
-    """Adaptive optimization sensor for one PV array."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        *,
-        entry_id: str,
-        entry_name: str,
-        coordinator: ForecastSolarDataUpdateCoordinator,
-        array_index: int,
-        metric_key: str,
-        name: str,
-        native_unit: str | None = None,
-    ) -> None:
-        super().__init__(coordinator=coordinator)
-        self._array_index = array_index
-        self._metric_key = metric_key
-        self._attr_name = name
-        self._attr_native_unit_of_measurement = native_unit
-
-        entry_slug = slugify(entry_name) or entry_id
-        suffix = slugify(name)
-        self.entity_id = f"{SENSOR_DOMAIN}.{entry_slug}_{suffix}"
-        self._attr_unique_id = f"{entry_id}_{suffix}"
-        self._attr_device_info = DeviceInfo(
-            entry_type=DeviceEntryType.SERVICE,
-            identifiers={(DOMAIN, entry_id)},
-            manufacturer="DWD (ICON)",
-            model=coordinator.data.account_type.value,
-            name=entry_name,
-            configuration_url="https://www.dwd.de/",
-        )
-
-    @property
-    def native_value(self) -> StateType:
-        return self.coordinator.get_adaptive_array_metric(
-            self._array_index,
-            self._metric_key,
-        )
 
 
 

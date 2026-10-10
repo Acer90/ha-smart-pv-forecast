@@ -13,6 +13,10 @@ from . import ForecastSolarConfigEntry
 TO_REDACT = {
     CONF_LATITUDE,
     CONF_LONGITUDE,
+    "pv_arrays",
+    "shading_objects",
+    "forecast_solar_api_key",
+    "google_maps_api_key",
 }
 
 
@@ -46,7 +50,6 @@ async def async_get_config_entry_diagnostics(
                 wh_datetime.isoformat(): wh_value
                 for wh_datetime, wh_value in coordinator.data.wh_period.items()
             },
-            "adaptive": coordinator.get_adaptive_snapshot(),
         },
         "account": {
             "type": coordinator.data.account_type.value,

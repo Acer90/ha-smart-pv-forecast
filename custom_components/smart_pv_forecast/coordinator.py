@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,28 +14,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as dt_now
 
 from .const import (
-    CONF_BATTERY_CHARGE_LIMIT,
-    CONF_BATTERY_CHARGE_POWER_ENTITY,
-    CONF_BATTERY_SOC_ENTITY,
-    CONF_BATTERY_SOC_THRESHOLD,
     CONF_DAMPING_EVENING,
     CONF_DAMPING_MORNING,
     CONF_ENABLE_DWD_SOURCE,
     CONF_ENABLE_FORECAST_SOLAR_SOURCE,
     CONF_ENABLE_OPEN_METEO_SOURCE,
-    CONF_ENABLE_SELF_OPTIMIZATION,
     CONF_FORECAST_SOLAR_API_KEY,
     CONF_HORIZON,
     CONF_INVERTER_SIZE,
     CONF_MOSMIX_STATION,
     CONF_OPEN_METEO_FORECAST_DAYS,
     CONF_PV_ARRAYS,
-    CONF_REAL_POWER_ENTITIES,
+    CONF_SHADING_OBJECTS,
     CONF_SOURCE_WEIGHT_DWD,
     CONF_SOURCE_WEIGHT_FORECAST_SOLAR,
     CONF_SOURCE_WEIGHT_OPEN_METEO,
@@ -44,21 +37,18 @@ from .const import (
     LOGGER,
 )
 
-from .dwd_icon import _parse_pv_arrays, build_array_watts, build_estimate
+from .dwd_icon import build_array_watts
+from .site import ObjectShading, flatten_arrays, geometry_required, normalize_arrays, normalize_inverters, normalize_objects, validate_inverter_assignments
+from .analysis import apply_inverter_limits, combine_arrays, daily_analysis, estimate_from_arrays, group_arrays
 from .dwd_mosmix import DwdMosmixClient
 from .forecast_solar_source import ForecastSolarClient
 from .models import Estimate, AccountType
 from .open_meteo_source import (
     OpenMeteoClient,
     build_array_watts_from_tilted_payload,
-    build_estimate_from_tilted_payload,
 )
 
 ForecastSolarConfigEntry: TypeAlias = ConfigEntry["ForecastSolarDataUpdateCoordinator"]
-
-_ADAPTIVE_MODEL_VERSION = 1
-_ADAPTIVE_SEASON_BUCKETS = 24
-
 
 class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
     """The Smart PV Forecast Data Update Coordinator."""
@@ -113,335 +103,17 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
         self._energy_snapshot_path: Path = Path(
             hass.config.path(f"{DOMAIN}_{entry.entry_id}_energy_snapshot.json")
         )
+        self._analysis_data: dict[str, Any] | None = None
+        self.setup_required = False
 
-        self._adaptive_store: Store[dict[str, Any]] = Store(
-            hass,
-            _ADAPTIVE_MODEL_VERSION,
-            f"{DOMAIN}_{entry.entry_id}_adaptive_model",
+    def get_daily_analysis(self) -> dict[str, Any]:
+        if self._analysis_data is None:
+            raise ValueError("Forecast analysis is not available yet")
+        return daily_analysis(
+            when=dt_now(),
+            forecast_day_count=int(self.config_entry.options.get("open_meteo_forecast_days", 7)),
+            **self._analysis_data,
         )
-        self._adaptive_model: dict[str, Any] = {
-            "version": _ADAPTIVE_MODEL_VERSION,
-            "arrays": [],
-        }
-        self._adaptive_loaded: bool = False
-        self._adaptive_last_learn_slot: str | None = None
-        self._adaptive_status: str = "idle"
-        self._adaptive_reason: str = "not_initialized"
-        self._adaptive_snapshot: dict[str, Any] = {
-            "enabled": False,
-            "average_factor": 1.0,
-            "average_reference_1000": 1000.0,
-            "samples_total": 0,
-            "arrays": [],
-            "status": self._adaptive_status,
-            "reason": self._adaptive_reason,
-        }
-
-    @staticmethod
-    def _safe_float(value: Any) -> float | None:
-        """Return float(value) or None for invalid input."""
-        try:
-            if value in (None, "", "unknown", "unavailable", "none"):
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _parse_entity_list(value: Any) -> list[str]:
-        """Parse a JSON list of entity IDs from options."""
-        if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip()]
-        if not isinstance(value, str) or not value.strip():
-            return []
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(parsed, list):
-            return []
-        return [str(item).strip() for item in parsed if str(item).strip()]
-
-    @staticmethod
-    def _season_bucket(ts: datetime) -> int:
-        """Map day-of-year into a coarse seasonal bucket."""
-        day = max(1, int(ts.timetuple().tm_yday))
-        return min(
-            _ADAPTIVE_SEASON_BUCKETS - 1,
-            int(((day - 1) * _ADAPTIVE_SEASON_BUCKETS) / 366),
-        )
-
-    @classmethod
-    def _bin_key(cls, ts: datetime) -> str:
-        """Return hour+season key for adaptive factors."""
-        return f"s{cls._season_bucket(ts)}_h{ts.hour:02d}"
-
-    def _set_adaptive_status(self, *, status: str, reason: str) -> None:
-        """Update runtime status fields for diagnostics and sensors."""
-        self._adaptive_status = status
-        self._adaptive_reason = reason
-
-    async def _async_ensure_adaptive_model_loaded(self) -> None:
-        """Load persisted adaptive model once."""
-        if self._adaptive_loaded:
-            return
-
-        stored = await self._adaptive_store.async_load()
-        if isinstance(stored, dict):
-            arrays = stored.get("arrays")
-            if isinstance(arrays, list):
-                self._adaptive_model = {
-                    "version": _ADAPTIVE_MODEL_VERSION,
-                    "arrays": arrays,
-                }
-            else:
-                self._adaptive_model = {
-                    "version": _ADAPTIVE_MODEL_VERSION,
-                    "arrays": [],
-                }
-        else:
-            self._adaptive_model = {
-                "version": _ADAPTIVE_MODEL_VERSION,
-                "arrays": [],
-            }
-
-        self._adaptive_loaded = True
-
-    def _ensure_adaptive_array_count(self, count: int) -> None:
-        """Grow adaptive model arrays list to match configured PV arrays."""
-        arrays = self._adaptive_model.setdefault("arrays", [])
-        if not isinstance(arrays, list):
-            arrays = []
-            self._adaptive_model["arrays"] = arrays
-
-        while len(arrays) < count:
-            arrays.append({"bins": {}})
-
-    def _adaptive_samples_total(self) -> int:
-        """Return total learned sample count across all arrays and bins."""
-        total = 0
-        arrays = self._adaptive_model.get("arrays", [])
-        if not isinstance(arrays, list):
-            return 0
-        for array_data in arrays:
-            if not isinstance(array_data, dict):
-                continue
-            bins = array_data.get("bins", {})
-            if not isinstance(bins, dict):
-                continue
-            for bucket in bins.values():
-                if not isinstance(bucket, dict):
-                    continue
-                try:
-                    total += int(bucket.get("count", 0))
-                except (TypeError, ValueError):
-                    continue
-        return total
-
-    def _get_adaptive_factor(self, array_idx: int, ts: datetime) -> float:
-        """Return learned factor for array/time slot (or 1.0 if unavailable)."""
-        arrays = self._adaptive_model.get("arrays", [])
-        if not isinstance(arrays, list) or array_idx < 0 or array_idx >= len(arrays):
-            return 1.0
-
-        array_data = arrays[array_idx]
-        if not isinstance(array_data, dict):
-            return 1.0
-
-        bins = array_data.get("bins", {})
-        if not isinstance(bins, dict):
-            return 1.0
-
-        bucket = bins.get(self._bin_key(ts), {})
-        if not isinstance(bucket, dict):
-            return 1.0
-
-        try:
-            factor = float(bucket.get("factor", 1.0))
-        except (TypeError, ValueError):
-            return 1.0
-        return max(0.5, min(1.3, factor))
-
-    def _get_adaptive_sample_count(self, array_idx: int, ts: datetime) -> int:
-        """Return learned sample count for array/time slot."""
-        arrays = self._adaptive_model.get("arrays", [])
-        if not isinstance(arrays, list) or array_idx < 0 or array_idx >= len(arrays):
-            return 0
-
-        array_data = arrays[array_idx]
-        if not isinstance(array_data, dict):
-            return 0
-
-        bins = array_data.get("bins", {})
-        if not isinstance(bins, dict):
-            return 0
-
-        bucket = bins.get(self._bin_key(ts), {})
-        if not isinstance(bucket, dict):
-            return 0
-
-        try:
-            return max(0, int(bucket.get("count", 0)))
-        except (TypeError, ValueError):
-            return 0
-
-    def _refresh_adaptive_snapshot(self, *, enabled: bool, local_now: datetime, array_count: int) -> None:
-        """Build snapshot values used by adaptive sensors and diagnostics."""
-        arrays_snapshot: list[dict[str, Any]] = []
-        average_factor = 1.0
-
-        if enabled and array_count > 0:
-            factors: list[float] = []
-            for idx in range(array_count):
-                factor = self._get_adaptive_factor(idx, local_now)
-                samples = self._get_adaptive_sample_count(idx, local_now)
-                arrays_snapshot.append(
-                    {
-                        "index": idx,
-                        "factor": round(factor, 4),
-                        "reference_1000": round(factor * 1000.0, 1),
-                        "samples": samples,
-                    }
-                )
-                factors.append(factor)
-
-            if factors:
-                average_factor = sum(factors) / len(factors)
-
-        self._adaptive_snapshot = {
-            "enabled": enabled,
-            "average_factor": round(average_factor, 4),
-            "average_reference_1000": round(average_factor * 1000.0, 1),
-            "samples_total": self._adaptive_samples_total(),
-            "arrays": arrays_snapshot,
-            "status": self._adaptive_status,
-            "reason": self._adaptive_reason,
-        }
-
-    @staticmethod
-    def _slot_value_from_map(values: dict[datetime, float], slot: datetime) -> float | None:
-        """Get exact or nearest value for the requested hour slot."""
-        if slot in values:
-            return float(values[slot])
-
-        nearest: float | None = None
-        nearest_delta = 10**9
-        for ts, val in values.items():
-            delta = abs(int((ts - slot).total_seconds()))
-            if delta < nearest_delta:
-                nearest_delta = delta
-                nearest = float(val)
-        if nearest_delta <= 3600:
-            return nearest
-        return None
-
-    async def _async_run_adaptive_learning(
-        self,
-        *,
-        local_now: datetime,
-        base_array_watts: list[dict[datetime, float]],
-        pv_array_count: int,
-        real_power_entities: list[str],
-        battery_soc_entity: str,
-        battery_charge_power_entity: str,
-        battery_charge_limit: float,
-        battery_soc_threshold: float,
-    ) -> None:
-        """Update adaptive model using real per-array power measurements."""
-        await self._async_ensure_adaptive_model_loaded()
-
-        if pv_array_count <= 0:
-            self._set_adaptive_status(status="skipped", reason="no_arrays")
-            return
-
-        if len(real_power_entities) != pv_array_count:
-            self._set_adaptive_status(status="skipped", reason="entity_count_mismatch")
-            return
-
-        hour_slot = local_now.replace(minute=0, second=0, microsecond=0)
-        slot_key = hour_slot.isoformat()
-        if self._adaptive_last_learn_slot == slot_key:
-            self._set_adaptive_status(status="skipped", reason="already_learned_this_hour")
-            return
-
-        soc_value: float | None = None
-        if battery_soc_entity:
-            soc_state = self.hass.states.get(battery_soc_entity)
-            soc_value = self._safe_float(soc_state.state if soc_state else None)
-            if soc_value is not None and soc_value >= battery_soc_threshold:
-                self._set_adaptive_status(status="filtered", reason="battery_soc_high")
-                self._adaptive_last_learn_slot = slot_key
-                return
-
-        if battery_charge_power_entity and battery_charge_limit > 0:
-            charge_state = self.hass.states.get(battery_charge_power_entity)
-            charge_power = self._safe_float(charge_state.state if charge_state else None)
-            if charge_power is not None and charge_power >= (0.98 * battery_charge_limit):
-                self._set_adaptive_status(status="filtered", reason="battery_charge_limit")
-                self._adaptive_last_learn_slot = slot_key
-                return
-
-        if not base_array_watts:
-            self._set_adaptive_status(status="skipped", reason="missing_base_data")
-            return
-
-        self._ensure_adaptive_array_count(pv_array_count)
-
-        min_base_power_watt = 120.0
-        learned_count = 0
-        for idx, entity_id in enumerate(real_power_entities):
-            if idx >= len(base_array_watts):
-                break
-
-            base_power = self._slot_value_from_map(base_array_watts[idx], hour_slot)
-            if base_power is None or base_power < min_base_power_watt:
-                continue
-
-            state = self.hass.states.get(entity_id)
-            measured_power = self._safe_float(state.state if state else None)
-            if measured_power is None or measured_power <= 0.0:
-                continue
-
-            ratio = measured_power / base_power
-            ratio = max(0.5, min(1.3, ratio))
-
-            arrays = self._adaptive_model["arrays"]
-            array_data = arrays[idx]
-            bins = array_data.setdefault("bins", {})
-            bucket_key = self._bin_key(hour_slot)
-            bucket = bins.setdefault(bucket_key, {"factor": 1.0, "count": 0})
-
-            old_factor = self._safe_float(bucket.get("factor")) or 1.0
-            old_count = int(bucket.get("count", 0))
-            alpha = 0.35 if old_count < 6 else 0.18
-            new_factor = old_factor + alpha * (ratio - old_factor)
-            bucket["factor"] = round(max(0.5, min(1.3, new_factor)), 6)
-            bucket["count"] = min(20000, old_count + 1)
-            learned_count += 1
-
-        self._adaptive_last_learn_slot = slot_key
-        if learned_count == 0:
-            self._set_adaptive_status(status="skipped", reason="no_valid_samples")
-            return
-
-        self._set_adaptive_status(status="learned", reason=f"arrays={learned_count}")
-        await self._adaptive_store.async_save(self._adaptive_model)
-
-    def get_adaptive_snapshot(self) -> dict[str, Any]:
-        """Return latest adaptive runtime snapshot for sensors and diagnostics."""
-        return dict(self._adaptive_snapshot)
-
-    def get_adaptive_array_metric(self, array_index: int, metric: str) -> Any:
-        """Get a single per-array adaptive metric by index."""
-        arrays = self._adaptive_snapshot.get("arrays", [])
-        if not isinstance(arrays, list):
-            return None
-        if array_index < 0 or array_index >= len(arrays):
-            return None
-        data = arrays[array_index]
-        if not isinstance(data, dict):
-            return None
-        return data.get(metric)
 
     @staticmethod
     def _aggregate_wh_days(wh_period: dict[datetime, float]) -> dict[datetime, float]:
@@ -460,6 +132,12 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
         """
         return self._energy_snapshot
 
+    def _configuration_fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps(
+            {"data": dict(self.config_entry.data), "options": dict(self.config_entry.options)},
+            sort_keys=True, default=str,
+        ).encode()).hexdigest()
+
     async def _async_init_energy_snapshot(self) -> None:
         """Load persisted energy snapshot from disk (called once at first update)."""
         try:
@@ -468,7 +146,11 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 from datetime import date as _date
                 if not self._energy_snapshot_path.exists():
                     return {}
-                data = _json.loads(self._energy_snapshot_path.read_text(encoding="utf-8"))
+                stored = _json.loads(self._energy_snapshot_path.read_text(encoding="utf-8"))
+                if not isinstance(stored, dict) or stored.get("fingerprint") != self._configuration_fingerprint():
+                    LOGGER.debug("[smart_pv_forecast] Snapshot configuration changed - discarding")
+                    return {}
+                data = stored.get("wh_hours")
                 if not isinstance(data, dict) or not data:
                     return {}
                 today_str = _date.today().isoformat()
@@ -478,7 +160,9 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 LOGGER.debug(
                     "[smart_pv_forecast] Loaded energy snapshot from disk (%d keys)", len(data)
                 )
-                return {k: float(v) for k, v in data.items()}
+                return {k: float(data[k]) for k in sorted(
+                    data, key=lambda key: datetime.fromisoformat(key).timestamp()
+                )}
 
             self._energy_snapshot = await self.hass.async_add_executor_job(_do_load)
         except Exception as exc:  # noqa: BLE001
@@ -494,7 +178,10 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
             def _do_save() -> None:
                 import json as _json
                 self._energy_snapshot_path.write_text(
-                    _json.dumps(snapshot, indent=None, separators=(",", ":")),
+                    _json.dumps(
+                        {"fingerprint": self._configuration_fingerprint(), "wh_hours": snapshot},
+                        indent=None, separators=(",", ":"),
+                    ),
                     encoding="utf-8",
                 )
                 LOGGER.debug(
@@ -511,11 +198,12 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
         """Rebuild and persist the energy snapshot from the latest estimate."""
         candidate: dict[str, float] = {
             ts.isoformat(): round(float(val), 1)
-            for ts, val in estimate.wh_period.items()
+            for ts, val in sorted(estimate.wh_period.items(), key=lambda item: item[0].timestamp())
         }
-        changed = not self._energy_snapshot or any(
-            abs(candidate.get(k, 0.0) - self._energy_snapshot.get(k, 0.0)) > 20.0
-            for k in set(candidate) | set(self._energy_snapshot)
+        changed = list(candidate) != list(self._energy_snapshot) or any(
+            (value == 0) != (self._energy_snapshot[key] == 0)
+            or abs(value - self._energy_snapshot[key]) > 20.0
+            for key, value in candidate.items()
         )
         if changed:
             self._energy_snapshot = candidate
@@ -760,28 +448,24 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
 
             horizon_deg = float(self.config_entry.options.get(CONF_HORIZON, 0))
             pv_arrays = self.config_entry.options.get(CONF_PV_ARRAYS, "[]")
-            parsed_arrays = _parse_pv_arrays(pv_arrays)
+            self.setup_required = pv_arrays in ([], "[]")
+            if self.setup_required:
+                self._analysis_data = None
+                LOGGER.info("PV setup required: draw arrays in the Smart PV configurator")
+                return estimate_from_arrays([], getattr(self.hass.config, "time_zone", "UTC"))
+            parsed_arrays = normalize_arrays(pv_arrays)
+            if geometry_required(parsed_arrays):
+                self.setup_required = True
+                self._analysis_data = None
+                LOGGER.warning("PV setup required: check upper-edge heights and vertical extents in Solarstudio")
+                return estimate_from_arrays([], getattr(self.hass.config, "time_zone", "UTC"))
+            surfaces, parents = flatten_arrays(parsed_arrays)
+            inverters = normalize_inverters(self.config_entry.options.get("inverters", []))
+            validate_inverter_assignments(parsed_arrays, inverters)
+            objects = normalize_objects(self.config_entry.options.get(CONF_SHADING_OBJECTS, []))
+            shading = ObjectShading(surfaces, objects, latitude, longitude)
             open_meteo_forecast_days = int(
                 self.config_entry.options.get(CONF_OPEN_METEO_FORECAST_DAYS, 7)
-            )
-
-            enable_self_optimization = bool(
-                self.config_entry.options.get(CONF_ENABLE_SELF_OPTIMIZATION, False)
-            )
-            real_power_entities = self._parse_entity_list(
-                self.config_entry.options.get(CONF_REAL_POWER_ENTITIES, "[]")
-            )
-            battery_soc_entity = str(
-                self.config_entry.options.get(CONF_BATTERY_SOC_ENTITY, "")
-            ).strip()
-            battery_charge_power_entity = str(
-                self.config_entry.options.get(CONF_BATTERY_CHARGE_POWER_ENTITY, "")
-            ).strip()
-            battery_charge_limit = float(
-                self.config_entry.options.get(CONF_BATTERY_CHARGE_LIMIT, 0.0)
-            )
-            battery_soc_threshold = float(
-                self.config_entry.options.get(CONF_BATTERY_SOC_THRESHOLD, 98.0)
             )
 
             inverter_size_watt = self.config_entry.options.get(CONF_INVERTER_SIZE)
@@ -798,6 +482,7 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 "longitude": longitude,
                 "station": station,
                 "pv_arrays": parsed_arrays,
+                "shading_objects": objects,
                 "damping_morning": damping_morning,
                 "damping_evening": damping_evening,
                 "inverter_size_watt": inverter_size_watt,
@@ -809,12 +494,6 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 "source_weight_open_meteo": self.config_entry.options.get(CONF_SOURCE_WEIGHT_OPEN_METEO, 50),
                 "source_weight_forecast_solar": self.config_entry.options.get(CONF_SOURCE_WEIGHT_FORECAST_SOLAR, 50),
                 "forecast_solar_api_key": current_fs_key,
-                "enable_self_optimization": enable_self_optimization,
-                "real_power_entities": real_power_entities,
-                "battery_soc_entity": battery_soc_entity,
-                "battery_charge_power_entity": battery_charge_power_entity,
-                "battery_charge_limit": battery_charge_limit,
-                "battery_soc_threshold": battery_soc_threshold,
                 "open_meteo_forecast_days": open_meteo_forecast_days,
             }
             fingerprint = hashlib.sha1(
@@ -823,7 +502,7 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
 
             payload_dwd: Any | None = None
             payload_om: Any | None = None
-            estimate_fs: Estimate | None = None
+            fs_raw: Any | None = None
 
             def _cached(name: str) -> Any | None:
                 entry = self._payload_cache.get(name)
@@ -868,7 +547,7 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                             self._open_meteo_client.fetch_radiation(
                                 latitude=latitude,
                                 longitude=longitude,
-                                pv_arrays=parsed_arrays,
+                                pv_arrays=surfaces,
                                 forecast_days=open_meteo_forecast_days,
                             ),
                         )
@@ -892,147 +571,75 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 if parsed_arrays:
                     cached_fs = _cached("fs")
                     if cached_fs is not None:
-                        estimate_fs = cached_fs
+                        fs_raw = cached_fs
                     else:
                         try:
                             fs_raw = await self._forecast_solar_client.fetch_estimate(
                                 latitude=latitude,
                                 longitude=longitude,
-                                pv_arrays=parsed_arrays,
+                                pv_arrays=surfaces,
                             )
-                            estimate_fs = Estimate(
-                                timezone=fs_raw.timezone,
-                                watts=fs_raw.watts,
-                                wh_period=fs_raw.wh_period,
-                                wh_days=fs_raw.wh_days,
-                                api_rate_limit=None,
-                                account_type=AccountType.DWD_ICON,
-                            )
-                            self._payload_cache["fs"] = (estimate_fs, local_now)
+                            self._payload_cache["fs"] = (fs_raw, local_now)
                             self._source_data_version += 1
                         except Exception as exc:  # noqa: BLE001
                             LOGGER.warning("Source forecast_solar failed: %s", exc)
 
-            if payload_dwd is None and payload_om is None and estimate_fs is None:
+            if payload_dwd is None and payload_om is None and fs_raw is None:
                 raise UpdateFailed("All configured data sources failed")
 
             build_kwargs: dict[str, Any] = dict(
                 latitude=latitude,
                 longitude=longitude,
-                pv_arrays=pv_arrays,
+                pv_arrays=surfaces,
                 damping_morning=damping_morning,
                 damping_evening=damping_evening,
                 inverter_size_watt=inverter_size_watt,
                 horizon_deg=horizon_deg,
             )
 
-            if enable_self_optimization:
-                await self._async_ensure_adaptive_model_loaded()
-
-                base_array_watts: list[dict[datetime, float]] = []
-                if payload_dwd is not None:
-                    base_array_watts = build_array_watts(
-                        payload_dwd,
-                        latitude=latitude,
-                        longitude=longitude,
-                        pv_arrays=parsed_arrays,
-                        damping_morning=damping_morning,
-                        damping_evening=damping_evening,
-                        inverter_size_watt=inverter_size_watt,
-                        horizon_deg=horizon_deg,
-                        array_factor_fn=None,
-                    )
-                elif payload_om is not None:
-                    base_array_watts = build_array_watts_from_tilted_payload(
-                        payload_om,
-                        latitude=latitude,
-                        longitude=longitude,
-                        pv_arrays=parsed_arrays,
-                        damping_morning=damping_morning,
-                        damping_evening=damping_evening,
-                        inverter_size_watt=inverter_size_watt,
-                        horizon_deg=horizon_deg,
-                        array_factor_fn=None,
-                    )
-
-                if base_array_watts:
-                    await self._async_run_adaptive_learning(
-                        local_now=local_now,
-                        base_array_watts=base_array_watts,
-                        pv_array_count=len(parsed_arrays),
-                        real_power_entities=real_power_entities,
-                        battery_soc_entity=battery_soc_entity,
-                        battery_charge_power_entity=battery_charge_power_entity,
-                        battery_charge_limit=battery_charge_limit,
-                        battery_soc_threshold=battery_soc_threshold,
-                    )
-                else:
-                    self._set_adaptive_status(
-                        status="skipped",
-                        reason="learning_needs_radiation_source",
-                    )
-            else:
-                self._set_adaptive_status(status="disabled", reason="feature_disabled")
-
-            array_factor_fn: Callable[[int, datetime], float] | None = None
-            if enable_self_optimization:
-                array_factor_fn = self._get_adaptive_factor
-
-            estimate_dwd: Estimate | None = None
-            estimate_om: Estimate | None = None
+            sources: list[tuple[list[dict[datetime, float]], float]] = []
+            source_names: list[str] = []
 
             if payload_dwd is not None:
-                estimate_dwd = build_estimate(
-                    payload_dwd,
-                    array_factor_fn=array_factor_fn,
-                    **build_kwargs,
-                )
+                sources.append((build_array_watts(payload_dwd, **build_kwargs),
+                                float(self.config_entry.options.get(CONF_SOURCE_WEIGHT_DWD, 50))))
+                source_names.append("DWD")
 
             if payload_om is not None:
-                estimate_om = build_estimate_from_tilted_payload(
-                    payload_om,
-                    latitude=latitude,
-                    longitude=longitude,
-                    pv_arrays=parsed_arrays,
-                    damping_morning=damping_morning,
-                    damping_evening=damping_evening,
-                    inverter_size_watt=inverter_size_watt,
-                    horizon_deg=horizon_deg,
-                    array_factor_fn=array_factor_fn,
-                )
-
-            w_dwd = int(self.config_entry.options.get(CONF_SOURCE_WEIGHT_DWD, 50))
-            w_om = int(self.config_entry.options.get(CONF_SOURCE_WEIGHT_OPEN_METEO, 50))
-            w_fs = int(self.config_entry.options.get(CONF_SOURCE_WEIGHT_FORECAST_SOLAR, 50))
+                sources.append((build_array_watts_from_tilted_payload(payload_om, **build_kwargs),
+                                float(self.config_entry.options.get(CONF_SOURCE_WEIGHT_OPEN_METEO, 50))))
+                source_names.append("Open-Meteo")
+            if fs_raw is not None:
+                sources.append((fs_raw.array_wh_period,
+                                float(self.config_entry.options.get(CONF_SOURCE_WEIGHT_FORECAST_SOLAR, 50))))
+                source_names.append("forecast.solar")
 
             fallback_tz: str = "UTC"
             for candidate in (payload_dwd, payload_om):
                 if candidate is not None:
                     fallback_tz = candidate.timezone
                     break
-            if estimate_fs is not None and fallback_tz == "UTC":
-                fallback_tz = estimate_fs.timezone
+            if fs_raw is not None and fallback_tz == "UTC":
+                fallback_tz = fs_raw.timezone
 
-            estimate = self._combine_estimates(
-                [
-                    (estimate_dwd, w_dwd),
-                    (estimate_om, w_om),
-                    (estimate_fs, w_fs),
-                ],
-                fallback_timezone=fallback_tz,
-            )
+            baseline = apply_inverter_limits(combine_arrays(sources, len(surfaces)), surfaces, inverters)
+            shaded = [
+                {ts: value * shading.factor(index, ts) for ts, value in values.items()}
+                for index, values in enumerate(baseline)
+            ]
+            grouped_baseline = group_arrays(baseline, parents, len(parsed_arrays))
+            grouped_shaded = group_arrays(shaded, parents, len(parsed_arrays))
+            estimate = estimate_from_arrays(grouped_shaded, fallback_tz)
+            self._analysis_data = {
+                "arrays": parsed_arrays, "baseline": grouped_baseline,
+                "shaded": grouped_shaded, "timezone": getattr(self.hass.config, "time_zone", fallback_tz),
+                "revision": self._configuration_fingerprint(), "sources": source_names,
+            }
 
             estimate = self._preserve_today_past_values(
                 existing=self.data,
                 updated=estimate,
                 local_now=local_now,
-            )
-
-            array_count = len(parsed_arrays)
-            self._refresh_adaptive_snapshot(
-                enabled=enable_self_optimization,
-                local_now=local_now,
-                array_count=array_count,
             )
 
             self._options_fingerprint = fingerprint

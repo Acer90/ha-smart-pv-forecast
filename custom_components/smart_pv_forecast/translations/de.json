@@ -1,130 +1,117 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "data": {
-                    "latitude": "Breitengrad (Dezimal, z.B. 51.234)",
-                    "longitude": "Längengrad (Dezimal, z.B. 7.123)",
-                    "mosmix_station": "DWD-Stationscode (MOSMIX-L, z.B. N7244)",
-                    "pv_arrays": "PV-Ausrichtungen JSON (z.B. peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30)",
-                    "name": "Name (z.B. PV Garage)"
-                },
-                "data_description": {
-                    "latitude": "Breitengrad des Standorts im Dezimalformat. Beispiel: 51.234",
-                    "longitude": "Längengrad des Standorts im Dezimalformat. Beispiel: 7.123",
-                    "mosmix_station": "DWD-Stationscode (1-10 alphanumerische Zeichen). Beispiel: N7244",
-                    "pv_arrays": "JSON-Liste mit Ausrichtungen. Beispielwerte: peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30",
-                    "name": "Anzeigename der Integration und Präfix für Entitäten. Beispiel: PV Garage"
-                },
-                "description": "Trage die Solarkonfiguration ein. Inline-Beispiele stehen direkt in den Feldtiteln."
-            }
-        }
-    },
-    "entity": {
-        "sensor": {
-            "energy_current_hour": {
-                "name": "Geschätzte Energieproduktion – diese Stunde"
-            },
-            "energy_next_hour": {
-                "name": "Geschätzte Energieproduktion – nächste Stunde"
-            },
-            "energy_production_today": {
-                "name": "Geschätzte Energieproduktion – heute"
-            },
-            "energy_production_today_remaining": {
-                "name": "Geschätzte Energieproduktion – Rest heute"
-            },
-            "energy_production_tomorrow": {
-                "name": "Geschätzte Energieproduktion – morgen"
-            },
-            "energy_production_day_3": {
-                "name": "Geschätzte Energieproduktion – in 2 Tagen"
-            },
-            "energy_production_day_4": {
-                "name": "Geschätzte Energieproduktion – in 3 Tagen"
-            },
-            "energy_production_in_days_dynamic": {
-                "name": "Geschätzte Energieproduktion – in {days} Tagen"
-            },
-            "power_highest_peak_time_today": {
-                "name": "Zeitpunkt der höchsten Leistungsspitze – heute"
-            },
-            "power_highest_peak_time_tomorrow": {
-                "name": "Zeitpunkt der höchsten Leistungsspitze – morgen"
-            },
-            "power_production_next_12hours": {
-                "name": "Geschätzte Leistungsproduktion – in 12 Stunden"
-            },
-            "power_production_next_24hours": {
-                "name": "Geschätzte Leistungsproduktion – in 24 Stunden"
-            },
-            "power_production_next_hour": {
-                "name": "Geschätzte Leistungsproduktion – in 1 Stunde"
-            },
-            "power_production_now": {
-                "name": "Geschätzte Leistungsproduktion – jetzt"
-            }
-        }
-    },
-    "options": {
-        "error": {
-            "daily_sensors_exceed_forecast_days": "Tages-Sensoranzahl darf die Open-Meteo Prognosetage nicht überschreiten",
-            "invalid_entity_id": "Ungültige Entitäts-ID",
-            "invalid_entity_count": "Anzahl der realen Leistungs-Entitäten muss der Anzahl der PV-Ausrichtungen entsprechen",
-            "missing_real_power_entities": "Mindestens eine reale Leistungs-Entität ist erforderlich, wenn die adaptive Optimierung aktiviert ist",
-            "invalid_pv_arrays": "Ungültiges JSON für PV-Ausrichtungen",
-            "invalid_station": "Ungültige Station"
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "google_maps_api_key": "Google Maps API-Schlüssel (optional; Satellitenkarten standardmäßig)",
+          "name": "Name (z.B. PV Garage)",
+          "enable_dwd_source": "DWD MOSMIX-L Quelle aktivieren",
+          "enable_open_meteo_source": "Open-Meteo Quelle aktivieren",
+          "enable_forecast_solar_source": "forecast.solar Quelle aktivieren",
+          "forecast_solar_api_key": "forecast.solar API-Schlüssel (optional, leer lassen für öffentlichen Zugang)",
+          "source_weight_dwd": "DWD-Quellgewichtung (0-100, wird mit anderen aktiven Quellen normiert)",
+          "source_weight_open_meteo": "Open-Meteo-Quellgewichtung (0-100, wird normiert)",
+          "source_weight_forecast_solar": "forecast.solar-Quellgewichtung (0-100, wird normiert)",
+          "mosmix_station": "DWD-Stationscode (MOSMIX-L, z.B. N7244)"
         },
-        "step": {
-            "init": {
-                "data": {
-                    "enable_dwd_source": "DWD MOSMIX-L Quelle aktivieren",
-                    "enable_open_meteo_source": "Open-Meteo Quelle aktivieren",
-                    "enable_forecast_solar_source": "forecast.solar Quelle aktivieren",
-                    "forecast_solar_api_key": "forecast.solar API-Schlüssel (optional, leer lassen für öffentlichen Zugang)",
-                    "source_weight_dwd": "DWD-Quellgewichtung (0-100, wird mit anderen aktiven Quellen normiert)",
-                    "source_weight_open_meteo": "Open-Meteo-Quellgewichtung (0-100, wird normiert)",
-                    "source_weight_forecast_solar": "forecast.solar-Quellgewichtung (0-100, wird normiert)",
-                    "open_meteo_forecast_days": "Open-Meteo Prognosehorizont in Tagen (1-16)",
-                    "daily_yield_sensor_days": "Anzahl Tagesertrags-Sensoren (heute+N, 2-16)",
-                    "damping_evening": "Dämpfung Abend (0.0-1.0, z.B. 0.1)",
-                    "damping_morning": "Dämpfung Morgen (0.0-1.0, z.B. 0.1)",
-                    "horizon": "Horizont in Grad (0-90, z.B. 8)",
-                    "inverter_size": "Wechselrichter-AC-Limit in Watt (optional, z.B. 6000)",
-                    "mosmix_station": "DWD-Stationscode (MOSMIX-L, z.B. N7244)",
-                    "pv_arrays": "PV-Ausrichtungen JSON (z.B. peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30)",
-                    "enable_self_optimization": "Adaptive Selbstoptimierung aktivieren",
-                    "real_power_entities": "JSON-Liste mit gemessenen PV-Leistungs-Entitäten (pro Ausrichtung, z.B. sensor.pv_east_power, sensor.pv_west_power)",
-                    "battery_soc_entity": "Batterie-SOC-Entität (optional, z.B. sensor.battery_soc)",
-                    "battery_charge_power_entity": "Batterie-Ladeleistungs-Entität (optional, z.B. sensor.battery_charge_power)",
-                    "battery_charge_limit": "Batterie-Ladelimit in Watt (optional, z.B. 5000)",
-                    "battery_soc_threshold": "SOC-Schwelle zum Lernstopp in Prozent (z.B. 98)"
-                },
-                "data_description": {
-                    "enable_dwd_source": "DWD MOSMIX-L Stationsdaten als Prognose-Quelle verwenden. Benötigt einen gültigen Stationscode.",
-                    "enable_open_meteo_source": "Open-Meteo Globalprognose als Prognose-Quelle verwenden. Kein API-Key erforderlich.",
-                    "enable_forecast_solar_source": "forecast.solar als Prognose-Quelle verwenden. Öffentliche API: 12 Anfragen/Stunde, 1 Aufruf pro PV-Ausrichtung. Optionaler API-Key für höhere Limits.",
-                    "forecast_solar_api_key": "Optionaler forecast.solar API-Key für Personal/Professional-Konten. Leer lassen für öffentlichen (kostenlosen) Zugang.",
-                    "source_weight_dwd": "Gewichtung der DWD-Quelle (0-100). Alle aktiven Quellgewichtungen werden normiert, daher zählen relative Werte.",
-                    "source_weight_open_meteo": "Gewichtung der Open-Meteo-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
-                    "source_weight_forecast_solar": "Gewichtung der forecast.solar-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
-                    "open_meteo_forecast_days": "Wie viele Tage Open-Meteo liefern soll (bis zu 16 Tage).",
-                    "daily_yield_sensor_days": "Wie viele Tageserträge als eigene Entitäten erstellt werden sollen (heute, morgen usw.).",
-                    "mosmix_station": "DWD-Stationscode für MOSMIX-L Daten. Beispiel: N7244",
-                    "pv_arrays": "JSON-Liste mit einem Eintrag je Ausrichtung. Beispielwerte: peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30",
-                    "damping_morning": "0.0 bis 1.0, z.B. 0.1 für 10% Reduktion am Morgen.",
-                    "damping_evening": "0.0 bis 1.0, z.B. 0.1 für 10% Reduktion am Abend.",
-                    "inverter_size": "Optionales AC-Limit in Watt. Beispiel: 6000",
-                    "horizon": "Ignoriert Sonne unterhalb dieser Höhe in Grad. Typisch: 0-15",
-                    "enable_self_optimization": "Lernt Korrekturfaktoren aus gemessener Leistung und wendet sie je Ausrichtung, Stunde und Saison an.",
-                    "real_power_entities": "JSON-Liste mit einer gemessenen Leistungs-Entität pro PV-Ausrichtung in derselben Reihenfolge wie pv_arrays.",
-                    "battery_soc_entity": "Optionale SOC-Entität der Batterie. Das Lernen wird pausiert, wenn die SOC-Schwelle überschritten wird.",
-                    "battery_charge_power_entity": "Optionale Ladeleistungs-Entität der Batterie. Das Lernen wird pausiert, wenn die Ladeleistung das Ladelimit erreicht.",
-                    "battery_charge_limit": "Optionales Batterie-Ladelimit, das zusammen mit der Ladeleistungs-Entität verwendet wird.",
-                    "battery_soc_threshold": "Ab diesem SOC-Wert wird das Lernen übersprungen."
-                },
-                "description": "Diese Optionen dienen zum Feintuning der Prognose. Inline-Beispiele stehen direkt in den Feldtiteln."
-            }
-        }
+        "data_description": {
+          "google_maps_api_key": "Maps JavaScript API (2D), Maps Static API (3D-Bodenbild) und Abrechnung aktivieren. Browser-Schlüssel auf beide APIs und deine Home-Assistant-Website-Adressen beschränken. Mit Schlüssel wird Google standardmäßig genutzt; dabei werden Kartenausschnitt und IP-Adresse an Google übermittelt. Kosten sind möglich. Leer lassen für OpenStreetMap.",
+          "name": "Anzeigename der Integration und Präfix für Entitäten. Beispiel: PV Garage",
+          "enable_dwd_source": "DWD MOSMIX-L Stationsdaten als Prognose-Quelle verwenden. Benötigt einen gültigen Stationscode.",
+          "enable_open_meteo_source": "Open-Meteo Globalprognose als Prognose-Quelle verwenden. Kein API-Key erforderlich.",
+          "enable_forecast_solar_source": "forecast.solar als Prognose-Quelle verwenden. Öffentliche API: 12 Anfragen/Stunde, 1 Aufruf pro PV-Ausrichtung. Optionaler API-Key für höhere Limits.",
+          "forecast_solar_api_key": "Optionaler forecast.solar API-Key für Personal/Professional-Konten. Leer lassen für öffentlichen (kostenlosen) Zugang.",
+          "source_weight_dwd": "Gewichtung der DWD-Quelle (0-100). Alle aktiven Quellgewichtungen werden normiert, daher zählen relative Werte.",
+          "source_weight_open_meteo": "Gewichtung der Open-Meteo-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
+          "source_weight_forecast_solar": "Gewichtung der forecast.solar-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
+          "mosmix_station": "DWD-Stationscode für MOSMIX-L Daten. Beispiel: N7244"
+        },
+        "description": "Hier Name, Prognosequellen und optional Google Maps einrichten. Solararrays, PV-Flächen, Winkel, Höhen, Verschattungen, Wechselrichter und Sensoren anschließend in der Solarprognose konfigurieren."
+      }
+    },
+    "error": {
+      "invalid_google_key": "Ungültiger Google Maps API-Schlüssel",
+      "invalid_station": "Ungueltige Station"
     }
+  },
+  "entity": {
+    "sensor": {
+      "energy_current_hour": {
+        "name": "Geschätzte Energieproduktion – diese Stunde"
+      },
+      "energy_next_hour": {
+        "name": "Geschätzte Energieproduktion – nächste Stunde"
+      },
+      "energy_production_today": {
+        "name": "Geschätzte Energieproduktion – heute"
+      },
+      "energy_production_today_remaining": {
+        "name": "Geschätzte Energieproduktion – Rest heute"
+      },
+      "energy_production_tomorrow": {
+        "name": "Geschätzte Energieproduktion – morgen"
+      },
+      "energy_production_day_3": {
+        "name": "Geschätzte Energieproduktion – in 2 Tagen"
+      },
+      "energy_production_day_4": {
+        "name": "Geschätzte Energieproduktion – in 3 Tagen"
+      },
+      "energy_production_in_days_dynamic": {
+        "name": "Geschätzte Energieproduktion – in {days} Tagen"
+      },
+      "power_highest_peak_time_today": {
+        "name": "Zeitpunkt der höchsten Leistungsspitze – heute"
+      },
+      "power_highest_peak_time_tomorrow": {
+        "name": "Zeitpunkt der höchsten Leistungsspitze – morgen"
+      },
+      "power_production_next_12hours": {
+        "name": "Geschätzte Leistungsproduktion – in 12 Stunden"
+      },
+      "power_production_next_24hours": {
+        "name": "Geschätzte Leistungsproduktion – in 24 Stunden"
+      },
+      "power_production_next_hour": {
+        "name": "Geschätzte Leistungsproduktion – in 1 Stunde"
+      },
+      "power_production_now": {
+        "name": "Geschätzte Leistungsproduktion – jetzt"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_google_key": "Ungültiger Google Maps API-Schlüssel",
+      "daily_sensors_exceed_forecast_days": "Tages-Sensoranzahl darf die Open-Meteo Prognosetage nicht überschreiten",
+      "invalid_station": "Ungültige Station"
+    },
+    "step": {
+      "init": {
+        "data": {
+          "google_maps_api_key": "Google Maps API-Schlüssel (optional; Satellitenkarten standardmäßig)",
+          "enable_dwd_source": "DWD MOSMIX-L Quelle aktivieren",
+          "enable_open_meteo_source": "Open-Meteo Quelle aktivieren",
+          "enable_forecast_solar_source": "forecast.solar Quelle aktivieren",
+          "forecast_solar_api_key": "forecast.solar API-Schlüssel (optional, leer lassen für öffentlichen Zugang)",
+          "source_weight_dwd": "DWD-Quellgewichtung (0-100, wird mit anderen aktiven Quellen normiert)",
+          "source_weight_open_meteo": "Open-Meteo-Quellgewichtung (0-100, wird normiert)",
+          "source_weight_forecast_solar": "forecast.solar-Quellgewichtung (0-100, wird normiert)",
+          "mosmix_station": "DWD-Stationscode (MOSMIX-L, z.B. N7244)"
+        },
+        "data_description": {
+          "google_maps_api_key": "Maps JavaScript API (2D), Maps Static API (3D-Bodenbild) und Abrechnung aktivieren. Browser-Schlüssel auf beide APIs und deine Home-Assistant-Website-Adressen beschränken. Mit Schlüssel wird Google standardmäßig genutzt; dabei werden Kartenausschnitt und IP-Adresse an Google übermittelt. Kosten sind möglich. Leer lassen für OpenStreetMap.",
+          "enable_dwd_source": "DWD MOSMIX-L Stationsdaten als Prognose-Quelle verwenden. Benötigt einen gültigen Stationscode.",
+          "enable_open_meteo_source": "Open-Meteo Globalprognose als Prognose-Quelle verwenden. Kein API-Key erforderlich.",
+          "enable_forecast_solar_source": "forecast.solar als Prognose-Quelle verwenden. Öffentliche API: 12 Anfragen/Stunde, 1 Aufruf pro PV-Ausrichtung. Optionaler API-Key für höhere Limits.",
+          "forecast_solar_api_key": "Optionaler forecast.solar API-Key für Personal/Professional-Konten. Leer lassen für öffentlichen (kostenlosen) Zugang.",
+          "source_weight_dwd": "Gewichtung der DWD-Quelle (0-100). Alle aktiven Quellgewichtungen werden normiert, daher zählen relative Werte.",
+          "source_weight_open_meteo": "Gewichtung der Open-Meteo-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
+          "source_weight_forecast_solar": "Gewichtung der forecast.solar-Quelle (0-100). Wird mit anderen aktiven Quellen normiert.",
+          "mosmix_station": "DWD-Stationscode für MOSMIX-L Daten. Beispiel: N7244"
+        },
+        "description": "Prognosequellen und optionaler Google Maps API-Zugang. Alle Anlagen-, Wechselrichter-, Sensor- und Prognoseeinstellungen befinden sich in der Solarprognose."
+      }
+    }
+  }
 }

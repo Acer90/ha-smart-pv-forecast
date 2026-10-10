@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 from aiohttp import ClientSession
@@ -19,7 +19,7 @@ _OPEN_METEO_FORECAST_URL: Final[str] = "https://api.open-meteo.com/v1/forecast"
 class OpenMeteoTiltedPayload:
     timezone: str
     hourly_time: list[str]
-    array_global_tilted_irradiance: list[list[float]]
+    array_global_tilted_irradiance: list[list[float | None]]
 
 
 def _ha_azimuth_to_open_meteo(ha_azimuth: float) -> float:
@@ -69,12 +69,12 @@ def build_array_watts_from_tilted_payload(
     *,
     latitude: float,
     longitude: float,
-    pv_arrays: list[dict[str, float]],
+    pv_arrays: list[dict[str, Any]],
     damping_morning: float,
     damping_evening: float,
     inverter_size_watt: float | None,
     horizon_deg: float,
-    array_factor_fn: Callable[[int, datetime], float] | None = None,
+    shading_factor_fn: Callable[[int, datetime], float] | None = None,
 ) -> list[dict[datetime, float]]:
     """Build per-array hourly watts from Open-Meteo global tilted irradiance."""
     if not pv_arrays:
@@ -92,11 +92,6 @@ def build_array_watts_from_tilted_payload(
             ts = parsed_ts.astimezone(tz)
         hourly_slots.append(ts.replace(minute=0, second=0, microsecond=0))
 
-    horizon_ok: dict[datetime, bool] = {}
-    for ts in hourly_slots:
-        midpoint = ts + timedelta(minutes=30)
-        horizon_ok[ts] = _sun_elevation(latitude, longitude, midpoint) >= float(horizon_deg)
-
     for idx, arr in enumerate(pv_arrays):
         irradiance_series = (
             payload.array_global_tilted_irradiance[idx]
@@ -105,7 +100,12 @@ def build_array_watts_from_tilted_payload(
         )
 
         for ts, gti in zip(hourly_slots, irradiance_series, strict=False):
-            if not horizon_ok.get(ts, True):
+            if gti is None:
+                continue
+            if _sun_elevation(
+                arr.get("latitude", latitude), arr.get("longitude", longitude),
+                ts + timedelta(minutes=30),
+            ) < float(horizon_deg):
                 arr_power = 0.0
             else:
                 damping = max(
@@ -113,13 +113,6 @@ def build_array_watts_from_tilted_payload(
                     1.0 - float(damping_morning if ts.hour < 12 else damping_evening),
                 )
                 arr_power = (max(0.0, float(gti)) / 1000.0) * float(arr["peak"]) * damping
-
-                if array_factor_fn is not None:
-                    try:
-                        factor = float(array_factor_fn(idx, ts))
-                    except (TypeError, ValueError):
-                        factor = 1.0
-                    arr_power *= max(0.2, min(1.5, factor))
 
             array_watts[idx][ts] = float(arr_power)
 
@@ -149,6 +142,11 @@ def build_array_watts_from_tilted_payload(
                     scaled[ts] = float(val) * day_factors.get(day_key, 1.0)
                 array_watts[idx] = scaled
 
+    if shading_factor_fn is not None:
+        array_watts = [
+            {ts: value * shading_factor_fn(index, ts) for ts, value in values.items()}
+            for index, values in enumerate(array_watts)
+        ]
     return array_watts
 
 
@@ -157,12 +155,12 @@ def build_estimate_from_tilted_payload(
     *,
     latitude: float,
     longitude: float,
-    pv_arrays: list[dict[str, float]],
+    pv_arrays: list[dict[str, Any]],
     damping_morning: float,
     damping_evening: float,
     inverter_size_watt: float | None,
     horizon_deg: float,
-    array_factor_fn: Callable[[int, datetime], float] | None = None,
+    shading_factor_fn: Callable[[int, datetime], float] | None = None,
 ) -> Estimate:
     """Build Estimate from Open-Meteo tilted irradiance payload."""
     array_watts = build_array_watts_from_tilted_payload(
@@ -174,7 +172,7 @@ def build_estimate_from_tilted_payload(
         damping_evening=damping_evening,
         inverter_size_watt=inverter_size_watt,
         horizon_deg=horizon_deg,
-        array_factor_fn=array_factor_fn,
+        shading_factor_fn=shading_factor_fn,
     )
 
     watts: dict[datetime, float] = {}
@@ -209,7 +207,7 @@ class OpenMeteoClient:
         *,
         latitude: float,
         longitude: float,
-        pv_arrays: list[dict[str, float]],
+        pv_arrays: list[dict[str, Any]],
         forecast_days: int = 7,
     ) -> OpenMeteoTiltedPayload:
         forecast_days = max(1, min(16, int(forecast_days)))
@@ -218,12 +216,12 @@ class OpenMeteoClient:
 
         timezone: str | None = None
         reference_times: list[str] | None = None
-        irradiance_series: list[list[float]] = []
+        irradiance_series: list[list[float | None]] = []
 
         for arr in pv_arrays:
             params = {
-                "latitude": latitude,
-                "longitude": longitude,
+                "latitude": arr.get("latitude", latitude),
+                "longitude": arr.get("longitude", longitude),
                 "hourly": "global_tilted_irradiance",
                 "tilt": float(arr["tilt"]),
                 "azimuth": _ha_azimuth_to_open_meteo(float(arr["azimuth"])),
@@ -252,15 +250,15 @@ class OpenMeteoClient:
             if reference_times is None:
                 reference_times = [str(t) for t in times]
                 irradiance_series.append(
-                    [float(v) if v is not None else 0.0 for v in gti]
+                    [float(v) if v is not None else None for v in gti]
                 )
                 continue
 
             by_time = {
-                str(t): float(v) if v is not None else 0.0
+                str(t): float(v) if v is not None else None
                 for t, v in zip(times, gti, strict=True)
             }
-            aligned = [by_time.get(ts, 0.0) for ts in reference_times]
+            aligned = [by_time.get(ts) for ts in reference_times]
             irradiance_series.append(aligned)
 
         return OpenMeteoTiltedPayload(

@@ -3,21 +3,35 @@
     "step": {
       "user": {
         "data": {
-          "latitude": "Latitude (decimal, e.g. 51.234)",
-          "longitude": "Longitude (decimal, e.g. 7.123)",
-          "mosmix_station": "DWD station code (MOSMIX-L, e.g. N7244)",
-          "pv_arrays": "PV arrays JSON (e.g. peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30)",
-          "name": "Name (e.g. PV Garage)"
+          "google_maps_api_key": "Google Maps API key (optional; satellite maps by default)",
+          "name": "Name (e.g. PV Garage)",
+          "enable_dwd_source": "Enable DWD MOSMIX-L source",
+          "enable_open_meteo_source": "Enable Open-Meteo source",
+          "enable_forecast_solar_source": "Enable forecast.solar source",
+          "forecast_solar_api_key": "forecast.solar API key (optional, leave empty for public)",
+          "source_weight_dwd": "DWD source weight (0-100, normalized with other active sources)",
+          "source_weight_open_meteo": "Open-Meteo source weight (0-100, normalized with other active sources)",
+          "source_weight_forecast_solar": "forecast.solar source weight (0-100, normalized with other active sources)",
+          "mosmix_station": "DWD station code (MOSMIX-L, e.g. N7244)"
         },
         "data_description": {
-          "latitude": "System latitude in decimal format. Example: 51.234",
-          "longitude": "System longitude in decimal format. Example: 7.123",
-          "mosmix_station": "Use a DWD station code (1-10 alphanumeric chars). Example: N7244",
-          "pv_arrays": "JSON list of orientations. Example values: peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30",
-          "name": "Display name used as integration and entity prefix. Example: PV Garage"
+          "google_maps_api_key": "Enable Maps JavaScript API (2D), Maps Static API (3D ground imagery) and billing. Restrict this browser key to both APIs and your Home Assistant website addresses. A saved key makes Google the default; Google receives map requests and charges may apply. Leave empty for OpenStreetMap.",
+          "name": "Display name used as integration and entity prefix. Example: PV Garage",
+          "enable_dwd_source": "Use DWD MOSMIX-L station data as a forecast source. Requires a valid station code.",
+          "enable_open_meteo_source": "Use Open-Meteo global forecast as a forecast source. No API key required.",
+          "enable_forecast_solar_source": "Use forecast.solar as a forecast source. Public API: 12 requests/hour, 1 call per PV array. Optional API key unlocks higher limits.",
+          "forecast_solar_api_key": "Optional forecast.solar API key for personal/professional accounts. Leave empty for public (free) access.",
+          "source_weight_dwd": "Weight for DWD source (0-100). All active source weights are normalized, so relative values matter, not absolute.",
+          "source_weight_open_meteo": "Weight for Open-Meteo source (0-100). Normalized with other active sources.",
+          "source_weight_forecast_solar": "Weight for forecast.solar source (0-100). Normalized with other active sources.",
+          "mosmix_station": "DWD station code used for MOSMIX-L data. Example: N7244"
         },
-        "description": "Fill in your solar configuration. Inline examples are included in each field label."
+        "description": "Configure name, forecast sources and optional Google Maps here. Manage plant geometry, inverters and sensors in Solar forecast."
       }
+    },
+    "error": {
+      "invalid_google_key": "Invalid Google Maps API key",
+      "invalid_station": "Invalid station"
     }
   },
   "entity": {
@@ -68,16 +82,14 @@
   },
   "options": {
     "error": {
+      "invalid_google_key": "Invalid Google Maps API key",
       "daily_sensors_exceed_forecast_days": "Daily sensor days cannot exceed Open-Meteo forecast days",
-      "invalid_entity_id": "Invalid entity ID",
-      "invalid_entity_count": "Number of real power entities must match number of PV arrays",
-      "missing_real_power_entities": "At least one real power entity is required when adaptive optimization is enabled",
-      "invalid_pv_arrays": "Invalid PV arrays JSON",
       "invalid_station": "Invalid station"
     },
     "step": {
       "init": {
         "data": {
+          "google_maps_api_key": "Google Maps API key (optional; satellite maps by default)",
           "enable_dwd_source": "Enable DWD MOSMIX-L source",
           "enable_open_meteo_source": "Enable Open-Meteo source",
           "enable_forecast_solar_source": "Enable forecast.solar source",
@@ -85,22 +97,10 @@
           "source_weight_dwd": "DWD source weight (0-100, normalized with other active sources)",
           "source_weight_open_meteo": "Open-Meteo source weight (0-100, normalized with other active sources)",
           "source_weight_forecast_solar": "forecast.solar source weight (0-100, normalized with other active sources)",
-          "open_meteo_forecast_days": "Open-Meteo forecast horizon in days (1-16)",
-          "daily_yield_sensor_days": "Number of daily yield sensors (today+N, 2-16)",
-          "damping_evening": "Evening damping (0.0-1.0, e.g. 0.1)",
-          "damping_morning": "Morning damping (0.0-1.0, e.g. 0.1)",
-          "horizon": "Horizon in degrees (0-90, e.g. 8)",
-          "inverter_size": "Inverter AC limit in Watt (optional, e.g. 6000)",
-          "mosmix_station": "DWD station code (MOSMIX-L, e.g. N7244)",
-          "pv_arrays": "PV arrays JSON (e.g. peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30)",
-          "enable_self_optimization": "Enable adaptive self-optimization",
-          "real_power_entities": "Measured PV power entities JSON list (per array, e.g. sensor.pv_east_power, sensor.pv_west_power)",
-          "battery_soc_entity": "Battery state-of-charge entity (optional, e.g. sensor.battery_soc)",
-          "battery_charge_power_entity": "Battery charge power entity (optional, e.g. sensor.battery_charge_power)",
-          "battery_charge_limit": "Battery charge limit in Watt (optional, e.g. 5000)",
-          "battery_soc_threshold": "SOC threshold for learning stop in percent (e.g. 98)"
+          "mosmix_station": "DWD station code (MOSMIX-L, e.g. N7244)"
         },
         "data_description": {
+          "google_maps_api_key": "Enable Maps JavaScript API (2D), Maps Static API (3D ground imagery) and billing. Restrict the browser key to both APIs and your Home Assistant website addresses. A saved key makes Google the default; Google receives map requests and charges may apply. Leave empty for OpenStreetMap.",
           "enable_dwd_source": "Use DWD MOSMIX-L station data as a forecast source. Requires a valid station code.",
           "enable_open_meteo_source": "Use Open-Meteo global forecast as a forecast source. No API key required.",
           "enable_forecast_solar_source": "Use forecast.solar as a forecast source. Public API: 12 requests/hour, 1 call per PV array. Optional API key unlocks higher limits.",
@@ -108,22 +108,9 @@
           "source_weight_dwd": "Weight for DWD source (0-100). All active source weights are normalized, so relative values matter, not absolute.",
           "source_weight_open_meteo": "Weight for Open-Meteo source (0-100). Normalized with other active sources.",
           "source_weight_forecast_solar": "Weight for forecast.solar source (0-100). Normalized with other active sources.",
-          "open_meteo_forecast_days": "How many days Open-Meteo should return (up to 16 days).",
-          "daily_yield_sensor_days": "How many daily yield sensors should be created as separate entities (today, tomorrow, etc.).",
-          "mosmix_station": "DWD station code used for MOSMIX-L data. Example: N7244",
-          "pv_arrays": "JSON list with one item per orientation. Example values: peak=2300 azimuth=95 tilt=35; peak=4600 azimuth=270 tilt=30",
-          "damping_morning": "0.0 to 1.0, where 0.1 means 10% reduction in morning hours.",
-          "damping_evening": "0.0 to 1.0, where 0.1 means 10% reduction in evening hours.",
-          "inverter_size": "Optional AC limit in Watt. Example: 6000",
-          "horizon": "Ignore sun below this elevation in degrees. Typical values: 0-15",
-          "enable_self_optimization": "Learns correction factors from measured power and applies them by orientation, hour and season.",
-          "real_power_entities": "JSON list with one measured power entity per PV array in the same order as pv_arrays.",
-          "battery_soc_entity": "Optional battery SOC entity. Learning is paused when SOC is above threshold.",
-          "battery_charge_power_entity": "Optional battery charge power entity. Learning is paused when charge power reaches the charge limit.",
-          "battery_charge_limit": "Optional battery charge limit used with battery charge power entity.",
-          "battery_soc_threshold": "When battery SOC is at or above this value, learning is skipped."
+          "mosmix_station": "DWD station code used for MOSMIX-L data. Example: N7244"
         },
-        "description": "Use these options to tune the forecast. Inline examples are included in each field label."
+        "description": "Forecast sources and optional Google Maps access. All plant settings are managed in Solar forecast."
       }
     }
   }

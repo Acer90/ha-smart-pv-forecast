@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import ClientSession
 
 from .models import AccountType, Estimate
+from .site import normalize_arrays
 
 
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/dwd-icon"
@@ -83,56 +83,6 @@ def _angle_in_range(angle: float, start: float, end: float) -> bool:
     if start <= end:
         return start <= angle <= end
     return angle >= start or angle <= end
-
-
-def _parse_pv_arrays(value: Any) -> list[dict[str, float]]:
-    """Accept already-parsed list or a JSON string; return normalized PV arrays.
-
-    Each item: {"peak": Wp, "azimuth": deg, "tilt": deg}
-    """
-    if value in (None, ""):
-        return []
-
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return []
-
-    if not isinstance(value, list):
-        return []
-
-    normalized: list[dict[str, float]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-
-        peak_raw = item.get("peak")
-        az_raw = item.get("azimuth")
-        tilt_raw = item.get("tilt")
-
-        if peak_raw is None or az_raw is None or tilt_raw is None:
-            continue
-
-        try:
-            peak = float(peak_raw)
-            az = float(az_raw)
-            tilt = float(tilt_raw)
-        except (TypeError, ValueError):
-            continue
-
-        if peak <= 0:
-            continue
-
-        normalized.append(
-            {
-                "peak": peak,
-                "azimuth": az % 360,
-                "tilt": max(0.0, min(90.0, tilt)),
-            }
-        )
-
-    return normalized
 
 
 def _poa_factor(*, sun_az: float, sun_el: float, panel_az: float, panel_tilt: float) -> float:
@@ -233,11 +183,11 @@ def build_array_watts(
     damping_evening: float,
     inverter_size_watt: float | None,
     horizon_deg: float,
-    array_factor_fn: Callable[[int, datetime], float] | None = None,
+    shading_factor_fn: Callable[[int, datetime], float] | None = None,
 ) -> list[dict[datetime, float]]:
     """Return per-array hourly watts for the given payload."""
     tz = ZoneInfo(payload.timezone)
-    arrays = _parse_pv_arrays(pv_arrays)
+    arrays = normalize_arrays(pv_arrays)
     if not arrays:
         return []
 
@@ -245,7 +195,6 @@ def build_array_watts(
     slots = _iter_payload_slots(payload, tz=tz)
 
     for hour_key, midpoint, ghi in slots:
-        sun_az, sun_el = _sun_position(latitude, longitude, midpoint)
         local_hour = midpoint.hour
         damping_factor = max(
             0.0,
@@ -253,6 +202,9 @@ def build_array_watts(
         )
 
         for idx, arr in enumerate(arrays):
+            sun_az, sun_el = _sun_position(
+                arr.get("latitude", latitude), arr.get("longitude", longitude), midpoint
+            )
             if sun_el < float(horizon_deg):
                 arr_power = 0.0
             else:
@@ -264,13 +216,6 @@ def build_array_watts(
                 )
                 arr_power = (ghi / 1000.0) * float(arr["peak"]) * poa_factor
                 arr_power *= damping_factor
-
-                if array_factor_fn is not None:
-                    try:
-                        factor = float(array_factor_fn(idx, hour_key))
-                    except (TypeError, ValueError):
-                        factor = 1.0
-                    arr_power *= max(0.2, min(1.5, factor))
 
             array_watts[idx][hour_key] = float(arr_power)
 
@@ -300,6 +245,11 @@ def build_array_watts(
                     scaled[ts] = float(val) * day_factors.get(day_key, 1.0)
                 array_watts[idx] = scaled
 
+    if shading_factor_fn is not None:
+        array_watts = [
+            {ts: value * shading_factor_fn(index, ts) for ts, value in values.items()}
+            for index, values in enumerate(array_watts)
+        ]
     return array_watts
 
 
@@ -313,12 +263,12 @@ def build_estimate(
     damping_evening: float,
     inverter_size_watt: float | None,
     horizon_deg: float,
-    array_factor_fn: Callable[[int, datetime], float] | None = None,
+    shading_factor_fn: Callable[[int, datetime], float] | None = None,
 ) -> Estimate:
     """Build a PV estimate from a radiation payload.
     """
     tz = ZoneInfo(payload.timezone)
-    arrays = _parse_pv_arrays(pv_arrays)
+    arrays = normalize_arrays(pv_arrays)
 
     if arrays:
         array_watts = build_array_watts(
@@ -330,7 +280,7 @@ def build_estimate(
             damping_evening=damping_evening,
             inverter_size_watt=inverter_size_watt,
             horizon_deg=horizon_deg,
-            array_factor_fn=array_factor_fn,
+            shading_factor_fn=shading_factor_fn,
         )
         watts: dict[datetime, float] = {}
         for idx in range(len(array_watts)):

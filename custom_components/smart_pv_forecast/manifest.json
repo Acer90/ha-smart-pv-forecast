@@ -1,7 +1,8 @@
 {
   "domain": "smart_pv_forecast",
   "name": "Smart PV Forecast",
-  "version": "0.2.0",
+  "version": "0.5.0",
+  "dependencies": ["frontend", "http", "websocket_api", "panel_custom", "lovelace"],
   "codeowners": ["@klaasnicolaas", "@frenck", "@acer90"],
   "config_flow": true,
   "documentation": "",
