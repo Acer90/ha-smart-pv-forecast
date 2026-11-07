@@ -295,7 +295,7 @@ await test("Hourly tables fit narrow and wide cards without horizontal scrolling
         assert(wrapper.scrollWidth<=wrapper.clientWidth+1,`Overflow with ${count} sensors at ${width}px`);
         assert(table.getBoundingClientRect().width<=wrapper.getBoundingClientRect().width+1);
         assert(table.querySelectorAll("tbody tr").length===24);
-        assert(table.querySelectorAll("thead th").length===4+count);
+        assert(table.querySelectorAll("thead th").length===5+count);
       }
       host.remove();
     }

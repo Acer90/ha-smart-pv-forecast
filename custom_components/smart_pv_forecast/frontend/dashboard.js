@@ -1,5 +1,5 @@
 import { TEXT, escapeHTML, infoDetails } from "./i18n.js";
-import { renderForecastDays, powerCard, wireChartInteraction, showChartTooltip } from "./charts.js";
+import { renderForecastDays, powerCard, wireChartInteraction, showChartTooltip, weatherFetchInfo } from "./charts.js?v=0.5.1";
 import { loadSiteHistory } from "./history.js";
 import { updateRenderedContent, resetRenderedContent } from "./render.js";
 
@@ -73,7 +73,7 @@ export async function dashboardData(hass, config) {
   };
 }
 
-const stylesheet = `<link rel="stylesheet" href="${new URL("./styles.css", import.meta.url)}">
+const stylesheet = `<link rel="stylesheet" href="${new URL("./styles.css?v=0.5.1", import.meta.url)}">
   <style>
     :host { height:auto; background:transparent; }
     ha-card { display:block; overflow:hidden; }
@@ -81,11 +81,12 @@ const stylesheet = `<link rel="stylesheet" href="${new URL("./styles.css", impor
     .message, .card-footer { padding:8px 12px; }
     .message:empty { display:none; }
     .error { color:var(--error-color,#c62828); }
-    .forecast-rows { grid-template-columns:65px minmax(0,1fr) max-content; gap:8px; }
+    .forecast-row { grid-template-columns:65px minmax(0,1fr) max-content; gap:8px; }
     .forecast-track { min-width:20px; }
     .compact .forecast-overview { padding:8px 10px; }
     .compact .forecast-overview > .row, .compact .forecast-key { display:none; }
-    .compact .forecast-rows { grid-template-columns:38px minmax(0,1fr) max-content; gap:5px 8px; margin:0; }
+    .compact .forecast-rows { gap:3px; margin:0; }
+    .compact .forecast-row { grid-template-columns:38px minmax(0,1fr) max-content; gap:5px 8px; min-height:36px; padding:4px 6px; }
     .compact .forecast-track { height:15px; }
     .compact .forecast-label, .compact .forecast-value {
       font-family:var(--ha-font-family-body, var(--paper-font-body1_-_font-family, inherit));
@@ -170,7 +171,8 @@ class SolarCard extends HTMLElement {
           ${missing ? `<p role="status">${missing === "strings" ? t.historyMissing : t[`total_measurement_${missing}`]}</p>` : ""}
           ${data.history_until ? `<p class="muted">${escapeHTML(data.date)} · ${t.historyUntil}: ${escapeHTML(new Intl.DateTimeFormat(language, {
             timeZone: data.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-          }).format(new Date(data.history_until)))}</p>` : ""}</div>`;
+          }).format(new Date(data.history_until)))}</p>` : ""}
+          ${weatherFetchInfo(data, t, language)}</div>`;
       }
       this.result = result;
       this.shadowRoot.querySelector(".message")?.remove();

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from typing import TypeAlias
@@ -37,7 +37,7 @@ from .const import (
     LOGGER,
 )
 
-from .dwd_icon import build_array_watts
+from .dwd_icon import build_array_watts, build_maximum_array_watts
 from .site import ObjectShading, flatten_arrays, geometry_required, normalize_arrays, normalize_inverters, normalize_objects, validate_inverter_assignments
 from .analysis import apply_inverter_limits, combine_arrays, daily_analysis, estimate_from_arrays, group_arrays
 from .dwd_mosmix import DwdMosmixClient
@@ -45,6 +45,7 @@ from .forecast_solar_source import ForecastSolarClient
 from .models import Estimate, AccountType
 from .open_meteo_source import (
     OpenMeteoClient,
+    build_terrestrial_radiation_maps,
     build_array_watts_from_tilted_payload,
 )
 
@@ -106,14 +107,22 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
         self._analysis_data: dict[str, Any] | None = None
         self.setup_required = False
 
-    def get_daily_analysis(self) -> dict[str, Any]:
+    def get_daily_analysis(self, selected_date: date | None = None) -> dict[str, Any]:
         if self._analysis_data is None:
             raise ValueError("Forecast analysis is not available yet")
-        return daily_analysis(
+        analysis = daily_analysis(
             when=dt_now(),
             forecast_day_count=int(self.config_entry.options.get("open_meteo_forecast_days", 7)),
+            selected_date=selected_date,
             **self._analysis_data,
         )
+        source_names = {"dwd": "DWD", "om": "Open-Meteo", "fs": "forecast.solar"}
+        analysis["source_fetch_times"] = {
+            source_names[name]: fetched_at.isoformat()
+            for name, (_, fetched_at) in self._payload_cache.items()
+            if name in source_names
+        }
+        return analysis
 
     @staticmethod
     def _aggregate_wh_days(wh_period: dict[datetime, float]) -> dict[datetime, float]:
@@ -560,11 +569,11 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                         LOGGER.warning("Source %s failed: %s", name, result)
                     elif name == "dwd":
                         payload_dwd = result
-                        self._payload_cache["dwd"] = (result, local_now)
+                        self._payload_cache["dwd"] = (result, dt_now())
                         self._source_data_version += 1
                     else:
                         payload_om = result
-                        self._payload_cache["om"] = (result, local_now)
+                        self._payload_cache["om"] = (result, dt_now())
                         self._source_data_version += 1
 
             if enable_forecast_solar:
@@ -579,7 +588,7 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                                 longitude=longitude,
                                 pv_arrays=surfaces,
                             )
-                            self._payload_cache["fs"] = (fs_raw, local_now)
+                            self._payload_cache["fs"] = (fs_raw, dt_now())
                             self._source_data_version += 1
                         except Exception as exc:  # noqa: BLE001
                             LOGGER.warning("Source forecast_solar failed: %s", exc)
@@ -623,16 +632,35 @@ class ForecastSolarDataUpdateCoordinator(DataUpdateCoordinator[Estimate]):
                 fallback_tz = fs_raw.timezone
 
             baseline = apply_inverter_limits(combine_arrays(sources, len(surfaces)), surfaces, inverters)
+            maximum_potential = apply_inverter_limits(
+                build_maximum_array_watts(
+                    baseline,
+                    latitude=latitude,
+                    longitude=longitude,
+                    pv_arrays=surfaces,
+                    damping_morning=damping_morning,
+                    damping_evening=damping_evening,
+                    horizon_deg=horizon_deg,
+                    terrestrial_radiation=(
+                        build_terrestrial_radiation_maps(payload_om)
+                        if payload_om is not None else None
+                    ),
+                ),
+                surfaces,
+                inverters,
+            )
             shaded = [
                 {ts: value * shading.factor(index, ts) for ts, value in values.items()}
                 for index, values in enumerate(baseline)
             ]
             grouped_baseline = group_arrays(baseline, parents, len(parsed_arrays))
             grouped_shaded = group_arrays(shaded, parents, len(parsed_arrays))
+            grouped_maximum_potential = group_arrays(maximum_potential, parents, len(parsed_arrays))
             estimate = estimate_from_arrays(grouped_shaded, fallback_tz)
             self._analysis_data = {
                 "arrays": parsed_arrays, "baseline": grouped_baseline,
-                "shaded": grouped_shaded, "timezone": getattr(self.hass.config, "time_zone", fallback_tz),
+                "shaded": grouped_shaded, "max_potential": grouped_maximum_potential,
+                "timezone": getattr(self.hass.config, "time_zone", fallback_tz),
                 "revision": self._configuration_fingerprint(), "sources": source_names,
             }
 

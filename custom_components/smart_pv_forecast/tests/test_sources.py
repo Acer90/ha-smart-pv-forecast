@@ -1,4 +1,5 @@
 import io
+import math
 import unittest
 import zipfile
 from datetime import datetime, timezone
@@ -46,6 +47,57 @@ class SourceTests(unittest.TestCase):
             dwd.build_estimate(payload, **self.kwargs)
             self.assertEqual([(c.args[0], c.args[1]) for c in position.call_args_list], [(51, 7), (52, 8)])
 
+    def test_maximum_power_uses_terrestrial_radiation_without_peak_cap(self):
+        slots = [{self.hour: 1000}, {self.hour: 1000}]
+        with patch.object(dwd, "_sun_position", return_value=(180, 60)):
+            values = dwd.build_maximum_array_watts(
+                slots, latitude=50, longitude=6, pv_arrays=self.arrays,
+                damping_morning=0, damping_evening=0, horizon_deg=0,
+                terrestrial_radiation=[{self.hour: 1400}, {self.hour: 700}],
+            )
+        self.assertEqual([item[self.hour] for item in values], [1400, 700])
+
+    def test_maximum_power_projects_extraterrestrial_radiation_without_clamping_gain(self):
+        surface = site.normalize_arrays([{
+            "peak": 1000, "azimuth": 180, "tilt": 35,
+            "latitude": 0, "longitude": 0, "height": 0,
+        }])
+        slots = [{self.hour: 1000}]
+        terrestrial = 410.8
+        sun_elevation = 17
+        sin_el = math.sin(math.radians(sun_elevation))
+        cos_incidence = (
+            math.cos(math.radians(sun_elevation)) * math.sin(math.radians(35))
+            + sin_el * math.cos(math.radians(35))
+        )
+        expected = terrestrial * cos_incidence / sin_el
+
+        with patch.object(dwd, "_sun_position", return_value=(180, sun_elevation)):
+            values = dwd.build_maximum_array_watts(
+                slots, latitude=0, longitude=0, pv_arrays=surface,
+                damping_morning=0, damping_evening=0, horizon_deg=0,
+                terrestrial_radiation=[{self.hour: terrestrial}],
+            )
+
+        self.assertGreater(expected, 1000)
+        self.assertAlmostEqual(values[0][self.hour], expected)
+
+    def test_maximum_power_falls_back_to_clear_sky_model_and_respects_horizon(self):
+        slots = [{self.hour: 1000}, {self.hour: 1000}]
+        with patch.object(dwd, "_sun_position", return_value=(180, -1)):
+            below_horizon = dwd.build_maximum_array_watts(
+                slots, latitude=50, longitude=6, pv_arrays=self.arrays,
+                damping_morning=0, damping_evening=0, horizon_deg=0,
+            )
+        self.assertEqual([item[self.hour] for item in below_horizon], [0, 0])
+        with patch.object(dwd, "_sun_position", return_value=(180, 60)):
+            fallback = dwd.build_maximum_array_watts(
+                slots, latitude=50, longitude=6, pv_arrays=self.arrays,
+                damping_morning=0, damping_evening=0, horizon_deg=0,
+            )
+        expected = 1098 * math.sin(math.radians(60)) * math.exp(-0.059 / math.sin(math.radians(60)))
+        self.assertAlmostEqual(fallback[0][self.hour], expected)
+
     def test_inverter_and_damping_preserved(self):
         payload = om.OpenMeteoTiltedPayload("UTC", [self.hour.isoformat()], [[1000], [1000]])
         with patch.object(om, "_sun_elevation", return_value=45):
@@ -84,13 +136,16 @@ class OpenMeteoMissingDataTests(unittest.IsolatedAsyncioTestCase):
     async def test_null_and_absent_surface_hours_are_not_zero_forecasts(self):
         times = ["2026-10-10T08:00", "2026-10-10T09:00", "2026-10-10T10:00"]
         responses = []
-        for slots, values in ((times, [500, None, 0]),
-                              ([times[0], times[2]], [600, 0])):
+        for slots, values, terrestrial in (
+            (times, [500, None, 0], [1000, None, 0]),
+            ([times[0], times[2]], [600, 0], [1500, 0]),
+        ):
             response = AsyncMock()
             response.__aenter__.return_value = response
             response.raise_for_status = Mock()
             response.json.return_value = {"timezone": "Europe/Berlin",
-                "hourly": {"time": slots, "global_tilted_irradiance": values}}
+                "hourly": {"time": slots, "global_tilted_irradiance": values,
+                           "terrestrial_radiation": terrestrial}}
             responses.append(response)
         session = Mock(get=Mock(side_effect=responses))
         client = om.OpenMeteoClient(session)
@@ -100,6 +155,9 @@ class OpenMeteoMissingDataTests(unittest.IsolatedAsyncioTestCase):
         ])
         payload = await client.fetch_radiation(latitude=51, longitude=7, pv_arrays=arrays)
         self.assertEqual(payload.array_global_tilted_irradiance, [[500, None, 0], [600, None, 0]])
+        radiation = om.build_terrestrial_radiation_maps(payload)
+        self.assertEqual(list(radiation[0].values()), [1000, None, 0])
+        self.assertEqual(list(radiation[1].values()), [1500, None, 0])
         with patch.object(om, "_sun_elevation", return_value=45):
             values = om.build_array_watts_from_tilted_payload(payload, latitude=51,
                 longitude=7, pv_arrays=arrays, damping_morning=0, damping_evening=0,

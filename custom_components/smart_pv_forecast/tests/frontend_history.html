@@ -5,7 +5,7 @@
 <pre id="results">Tests laufen …</pre>
 <script type="module">
 import { dayTimeline, hourlyPower, loadStringHistory, loadSiteHistory, totalHourlyPower } from "../frontend/history.js";
-import { chartSVG, renderAnalysis, wireChartInteraction, renderForecastDays } from "../frontend/charts.js";
+import { chartSVG, renderAnalysis, wireChartInteraction, wireForecastSelection, renderForecastDays } from "../frontend/charts.js";
 import { TEXT, infoDetails } from "../frontend/i18n.js";
 const results = [];
 const assert = (value, message = "Assertion failed") => { if (!value) throw Error(message); };
@@ -248,6 +248,27 @@ await test("Multi-day bars use exact configured thresholds and shared scale", ()
   const unknown=root.querySelectorAll(".forecast-fill")[3];
   close(parseFloat(unknown.style.width),0);
 });
+await test("Forecast date rows select as a whole and expose selected state", () => {
+  const days=[
+    {date:"2026-06-21",shaded_wh:47000,covered_hours:24,expected_hours:24},
+    {date:"2026-06-22",shaded_wh:72900,covered_hours:24,expected_hours:24},
+  ];
+  const root=document.createElement("div");
+  root.innerHTML=renderForecastDays(days,TEXT.de,"de",{},false,"2026-06-21");
+  const rows=[...root.querySelectorAll("[data-forecast-date]")];
+  assert(rows.length===2 && rows[0].getAttribute("aria-pressed")==="true"
+    && rows[0].classList.contains("selected"));
+  assert(rows.map(row=>row.dataset.forecastDate).join(",")==="2026-06-21,2026-06-22");
+  assert(rows[0].querySelector(".forecast-label") && rows[0].querySelector(".forecast-track")
+    && rows[0].querySelector(".forecast-value"));
+  let selected=null;
+  const unwire=wireForecastSelection(root,date=>selected=date);
+  rows[1].querySelector(".forecast-track").click();
+  assert(selected==="2026-06-22");
+  unwire();
+  root.innerHTML=renderForecastDays(days,TEXT.de,"de");
+  assert(!root.querySelector("[data-forecast-date]"));
+});
 await test("Threshold settings change exact segment boundaries", () => {
   const root=document.createElement("div");
   root.innerHTML=renderForecastDays([{date:"2026-06-21",shaded_wh:30000,covered_hours:24,expected_hours:24}],
@@ -283,23 +304,45 @@ await test("Charts include measurement scale, table, accessible tooltip and isol
   assert(root.querySelector('[data-tooltip="0"]').textContent.includes("2.000 W"));
 });
 await test("Whole-site power card replaces reduction chart and exposes total measurement", () => {
-  const total={name:"Total",covered_hours:24,baseline_wh:4000,shaded_wh:2000,reduction_percent:50,
-    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:4000,shaded_w:2000,reduction_percent:50})),
+  const total={name:"Total",covered_hours:24,max_potential_wh:6000,baseline_wh:4000,shaded_wh:2000,
+    cloud_loss_wh:2000,shading_loss_wh:2000,reduction_percent:50,
+    hours:Array.from({length:24},(_,hour)=>({hour,max_potential_w:6000,baseline_w:4000,shaded_w:2000,reduction_percent:50})),
     measurement:{values:Array(24).fill(3000),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
   const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],total,arrays:[{...total,name:"Array",measurement:null}]};
   const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
   assert(!root.querySelector('[data-chart="reduction"]') && root.querySelector('[data-chart="total"]'));
   assert(root.querySelector(".total-analysis").textContent.includes(TEXT.de.measuredTotal));
+  const stats=[...root.querySelectorAll(".total-analysis .stat")];
+  assert(stats.length===3);
+  assert(stats[0].querySelector("strong").textContent==="72 kWh");
+  assert(stats[0].textContent.includes(TEXT.de.measuredYield));
+  assert(stats[0].querySelector("small").textContent.includes("6 kWh")
+    && stats[0].querySelector("small").textContent.includes(TEXT.de.maxPotential));
+  assert(stats[1].textContent.includes("2 kWh")&&stats[1].textContent.includes(TEXT.de.cloudLoss));
+  assert(stats[2].textContent.includes("2 kWh")&&stats[2].textContent.includes(TEXT.de.shadingLoss));
   assert(!root.textContent.includes("Stunden mit Daten") && !root.textContent.includes("24/24"));
   wireChartInteraction(root,data,TEXT.de,"de");
   root.querySelector('[data-chart="total"][data-hour="8"]').dispatchEvent(new Event("focusin",{bubbles:true}));
   assert(root.querySelector('[data-tooltip="total"]').textContent.includes("3.000 W"));
 });
+await test("Missing maximum yield never renders NaN or replaces measured yield", () => {
+  const total={name:"Total",max_potential_wh:undefined,baseline_wh:0,shaded_wh:0,
+    cloud_loss_wh:null,shading_loss_wh:null,reduction_percent:0,
+    hours:Array.from({length:24},(_,hour)=>({hour,max_potential_w:null,baseline_w:0,shaded_w:0,reduction_percent:0})),
+    measurement:{values:Array(24).fill(100),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
+  const root=document.createElement("div");
+  root.innerHTML=renderAnalysis({date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[{...total,name:"Array"}],total},
+    TEXT.de,"de");
+  assert(!root.textContent.includes("NaN"));
+  assert(root.querySelector(".total-analysis .stat strong").textContent==="2,4 kWh");
+  assert(root.querySelector(".total-analysis .stat small").textContent.includes("— kWh"));
+});
 await test("Total measurements are stacked per inverter with correct scale and no measured line or incomplete bars", () => {
   const measured=(label,value)=>({label,inverter:true,values:Array(24).fill(value),
     minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)});
-  const total={name:"Total",covered_hours:24,baseline_wh:100,shaded_wh:80,reduction_percent:20,
-    hours:Array.from({length:24},(_,hour)=>({hour,baseline_w:100,shaded_w:80,reduction_percent:20})),
+  const total={name:"Total",covered_hours:24,max_potential_wh:120,baseline_wh:100,shaded_wh:80,
+    cloud_loss_wh:20,shading_loss_wh:20,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,max_potential_w:120,baseline_w:100,shaded_w:80,reduction_percent:20})),
     inverters:[measured("East",300),measured("West",500)],
     measurement:{values:Array(24).fill(800),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
   total.measurement.values[9]=null;
@@ -308,9 +351,9 @@ await test("Total measurements are stacked per inverter with correct scale and n
     arrays:[{...total,name:"Roof",inverters:[],measurement:null}]};
   const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
   const chart=root.querySelector(".total-analysis .chart");
-  assert(chart.querySelectorAll("path").length===2);
+  assert(chart.querySelectorAll("path").length===3);
   assert([...chart.querySelectorAll("path")].every(path => path.getAttribute("stroke-width")==="1.5"));
-  assert(chart.querySelectorAll("path")[1].getAttribute("stroke")==="#1976d2");
+  assert(chart.querySelectorAll("path")[2].getAttribute("stroke")==="#1976d2");
   assert(root.querySelector(".total-analysis .legend").innerHTML.includes("--color:#1976d2"));
   assert([...root.querySelectorAll(".charts .chart path")].every(path => path.getAttribute("stroke-width")==="2.8"));
   assert(chart.querySelectorAll(".measured-bar").length===46);
@@ -371,6 +414,68 @@ await test("Array legends, tables and tooltips show individual strings, never in
   root.querySelector('[data-chart="0"][data-hour="8"]').dispatchEvent(new Event("focusin",{bubbles:true}));
   assert(!tooltip.hidden && tooltip.textContent.includes("300 W") && tooltip.textContent.includes("500 W"));
   assert(!tooltip.textContent.includes("1.200 W"));
+});
+await test("Chart data series toggle independently, default visibility is correct and choices survive refresh", () => {
+  const array={name:"Roof",covered_hours:24,max_potential_wh:120,baseline_wh:100,shaded_wh:80,
+    cloud_loss_wh:20,shading_loss_wh:20,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,max_potential_w:120,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    strings:[{label:"Roof / MPPT",values:Array(24).fill(50),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}]};
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[array],total:{...array,name:"Total"}};
+  const root=document.createElement("div");
+  const render=()=>{root.innerHTML=renderAnalysis(data,TEXT.de,"de");wireChartInteraction(root,data,TEXT.de,"de");};
+  render();
+  const control=(chart,key)=>root.querySelector(`.series-toggle[data-series-chart="${chart}"][data-series="${key}"]`);
+  const plot=(chart,key)=>root.querySelector(`.series-plot[data-series-chart="${chart}"][data-series="${key}"]`);
+  const chart=()=>root.querySelector('.chart[data-chart-id="total"]');
+  const topLabel=()=>chart().querySelector('.chart-y-label[data-grid-level="2"]').textContent;
+  const baselinePath=()=>plot("total","baseline").querySelector("path").getAttribute("d");
+  assert(plot("total","max-potential").style.display==="none");
+  assert(plot("0","max-potential").style.display==="none");
+  assert(plot("total","baseline").style.display!=="none");
+  assert(plot("total","shaded").style.display!=="none");
+  assert(plot("total","measurement-0").style.display!=="none");
+  assert(chart().dataset.chartMaximum==="100","Hidden maximum series must not set the initial scale");
+  assert(topLabel()==="100");
+  const initialBaselinePath=baselinePath();
+  control("total","max-potential").click();
+  assert(chart().dataset.chartMaximum==="200","Showing maximum series must expand the scale");
+  assert(topLabel()==="200" && baselinePath()!==initialBaselinePath);
+  control("total","max-potential").click();
+  assert(chart().dataset.chartMaximum==="100","Hiding maximum series must restore the visible-data scale");
+  assert(topLabel()==="100" && baselinePath()===initialBaselinePath);
+  control("total","max-potential").click();
+  control("total","baseline").click();
+  control("total","measurement-0").click();
+  assert(control("total","max-potential").getAttribute("aria-pressed")==="true");
+  assert(control("total","baseline").getAttribute("aria-pressed")==="false");
+  assert(control("total","measurement-0").getAttribute("aria-pressed")==="false");
+  assert(control("0","max-potential").getAttribute("aria-pressed")==="false");
+  render();
+  assert(control("total","max-potential").getAttribute("aria-pressed")==="true");
+  assert(control("total","baseline").getAttribute("aria-pressed")==="false");
+  assert(control("total","measurement-0").getAttribute("aria-pressed")==="false");
+  assert(control("0","max-potential").getAttribute("aria-pressed")==="false");
+});
+await test("Hiding an inverter series re-stacks the remaining measured bars", () => {
+  const inverter=(label,value)=>({label,inverter:true,values:Array(24).fill(value),
+    minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)});
+  const array={name:"Total",covered_hours:24,max_potential_wh:120,baseline_wh:100,shaded_wh:80,
+    cloud_loss_wh:20,shading_loss_wh:20,reduction_percent:20,
+    hours:Array.from({length:24},(_,hour)=>({hour,max_potential_w:120,baseline_w:100,shaded_w:80,reduction_percent:20})),
+    inverters:[inverter("East",300),inverter("West",500)],
+    measurement:{values:Array(24).fill(800),minutes:Array(24).fill(60),elapsedMinutes:Array(24).fill(60)}};
+  const data={date:"2026-06-21",timezone:"Europe/Berlin",sources:[],arrays:[array],total:array};
+  const root=document.createElement("div");root.innerHTML=renderAnalysis(data,TEXT.de,"de");
+  wireChartInteraction(root,data,TEXT.de,"de");
+  const chart=root.querySelector('.chart[data-chart-id="total"]');
+  assert(chart.dataset.chartMaximum==="800","Visible stacked inverters must determine the scale");
+  const west=root.querySelector('.measured-bar[data-inverter="1"][data-bar-hour="8"]');
+  const initialY=Number(west.getAttribute("y"));
+  const initialHeight=Number(west.getAttribute("height"));
+  root.querySelector('.series-toggle[data-series-chart="total"][data-series="measurement-0"]').click();
+  assert(chart.dataset.chartMaximum==="500","Hiding an inverter must rescale the chart");
+  assert(Number(west.getAttribute("y"))<=initialY);
+  assert(Number(west.getAttribute("height"))>initialHeight);
 });
 document.getElementById("results").textContent=`${results.length} tests passed\n${results.join("\n")}`;
 window.testResults={passed:results.length};

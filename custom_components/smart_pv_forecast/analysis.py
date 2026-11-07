@@ -73,27 +73,44 @@ def estimate_from_arrays(values: list[dict[datetime, float]], timezone: str) -> 
 
 
 def _day_report(name: str, baseline: dict[datetime, float], shaded: dict[datetime, float],
-                tz: ZoneInfo, day: date) -> dict[str, Any]:
-    buckets: list[list[tuple[float, float]]] = [[] for _ in range(24)]
+                tz: ZoneInfo, day: date,
+                max_potential: dict[datetime, float] | None = None) -> dict[str, Any]:
+    buckets: list[list[tuple[float, float, float | None]]] = [[] for _ in range(24)]
     for ts, value in baseline.items():
         local = ts.astimezone(tz)
         if local.date() == day:
-            buckets[local.hour].append((value, shaded[ts]))
+            buckets[local.hour].append((
+                value, shaded[ts],
+                max_potential.get(ts) if max_potential is not None else None,
+            ))
     hours: list[dict[str, Any]] = []
     for hour, entries in enumerate(buckets):
-        base = sum(b for b, _ in entries) / len(entries) if entries else None
-        actual = sum(s for _, s in entries) / len(entries) if entries else None
+        base = sum(b for b, _, _ in entries) / len(entries) if entries else None
+        actual = sum(s for _, s, _ in entries) / len(entries) if entries else None
+        potential_values = [c for _, _, c in entries if c is not None]
+        potential = sum(potential_values) / len(potential_values) if potential_values else None
+        cloud_loss_values = [c - b for b, _, c in entries if c is not None]
         hours.append({
             "hour": hour, "baseline_w": base, "shaded_w": actual,
-            "baseline_wh": sum(b for b, _ in entries) if entries else None,
-            "shaded_wh": sum(s for _, s in entries) if entries else None,
+            "max_potential_w": potential,
+            "baseline_wh": sum(b for b, _, _ in entries) if entries else None,
+            "shaded_wh": sum(s for _, s, _ in entries) if entries else None,
+            "max_potential_wh": sum(potential_values) if potential_values else None,
+            "cloud_loss_wh": sum(cloud_loss_values) if cloud_loss_values else None,
+            "shading_loss_wh": sum(b - s for b, s, _ in entries) if entries else None,
             "reduction_percent": 100 * (1 - actual / base) if base and actual is not None else 0 if base == 0 else None,
         })
     base_wh = sum(h["baseline_wh"] or 0 for h in hours)
     actual_wh = sum(h["shaded_wh"] or 0 for h in hours)
+    maximum_values = [h["max_potential_wh"] for h in hours if h["max_potential_wh"] is not None]
+    cloud_loss_values = [h["cloud_loss_wh"] for h in hours if h["cloud_loss_wh"] is not None]
+    shading_loss_values = [h["shading_loss_wh"] for h in hours if h["shading_loss_wh"] is not None]
     return {
         "name": name, "hours": hours,
         "baseline_wh": base_wh, "shaded_wh": actual_wh,
+        "max_potential_wh": sum(maximum_values) if maximum_values else None,
+        "cloud_loss_wh": sum(cloud_loss_values) if cloud_loss_values else None,
+        "shading_loss_wh": sum(shading_loss_values) if shading_loss_values else None,
         "reduction_percent": 100 * (1 - actual_wh / base_wh) if base_wh else 0,
         "covered_hours": sum(bool(b) for b in buckets),
     }
@@ -102,30 +119,50 @@ def _day_report(name: str, baseline: dict[datetime, float], shaded: dict[datetim
 def daily_analysis(arrays: list[dict[str, Any]], baseline: list[dict[datetime, float]],
                    shaded: list[dict[datetime, float]], timezone: str,
                    when: datetime, revision: str, sources: list[str],
-                   forecast_day_count: int = 7) -> dict[str, Any]:
+                   forecast_day_count: int = 7,
+                   max_potential: list[dict[datetime, float]] | None = None,
+                   selected_date: date | None = None) -> dict[str, Any]:
     tz = ZoneInfo(timezone)
-    day = when.astimezone(tz).date()
-    result = [_day_report(array["name"], baseline[index], shaded[index], tz, day)
+    today = when.astimezone(tz).date()
+    day = selected_date or today
+    result = [_day_report(array["name"], baseline[index], shaded[index], tz, day,
+                          max_potential[index] if max_potential is not None else None)
               for index, array in enumerate(arrays)]
     # A whole-site value requires every array at the same real instant, including DST folds.
     maps = [*baseline, *shaded]
     shared = set.intersection(*(set(values) for values in maps)) if maps else set()
     total_baseline = {ts: sum(values[ts] for values in baseline) for ts in shared}
     total_shaded = {ts: sum(values[ts] for values in shaded) for ts in shared}
-    total = _day_report("Total", total_baseline, total_shaded, tz, day)
+    total_maximum = None
+    if max_potential is not None:
+        maximum_shared = set.intersection(*(set(values) for values in [*maps, *max_potential])) if max_potential else set()
+        total_maximum = {
+            ts: sum(values[ts] for values in max_potential)
+            for ts in maximum_shared
+        }
+    total = _day_report("Total", total_baseline, total_shaded, tz, day, total_maximum)
     forecast_days = []
     for offset in range(forecast_day_count):
-        forecast_day = day + timedelta(days=offset)
+        forecast_day = today + timedelta(days=offset)
         slots = [ts for ts in shared if ts.astimezone(tz).date() == forecast_day]
         start = datetime.combine(forecast_day, datetime.min.time(), tzinfo=tz)
         end = datetime.combine(forecast_day + timedelta(days=1), datetime.min.time(), tzinfo=tz)
         expected = (end.astimezone(utc_timezone.utc) - start.astimezone(utc_timezone.utc)).total_seconds() / 3600
+        maximum_slots = [ts for ts in slots if total_maximum is not None and ts in total_maximum]
         forecast_days.append({
             "date": forecast_day.isoformat(),
             "baseline_wh": sum(total_baseline[ts] for ts in slots) if slots else None,
             "shaded_wh": sum(total_shaded[ts] for ts in slots) if slots else None,
+            "max_potential_wh": (
+                sum(total_maximum[ts] for ts in maximum_slots)
+                if maximum_slots else None
+            ),
             "covered_hours": len(slots), "expected_hours": expected,
         })
+    if selected_date is not None and not any(
+        forecast_day["date"] == selected_date.isoformat() for forecast_day in forecast_days
+    ):
+        raise ValueError("Selected date is outside the forecast period")
     return {"date": day.isoformat(), "timezone": timezone, "revision": revision,
             "sources": sources, "arrays": result, "total": total, "forecast_days": forecast_days,
             "generated_at": when.isoformat()}

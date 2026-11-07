@@ -3,7 +3,7 @@
 ## Ziel und Zuständigkeiten
 
 PV-Ertragsprognose für Home Assistant aus Open-Meteo, DWD MOSMIX-L und
-optional forecast.solar. Stand: Version **0.5.0**, Config-Entry-Version **7**.
+optional forecast.solar. Stand: Version **0.5.1**, Config-Entry-Version **7**.
 Keine adaptive Selbstoptimierung, Lernfilter oder Adaptive-Sensoren.
 
 - Native Integrationsdialoge: ausschließlich Name bei Einrichtung und Quellen.
@@ -11,6 +11,7 @@ Keine adaptive Selbstoptimierung, Lernfilter oder Adaptive-Sensoren.
   PV-Flächen, Schattenlinien, Wechselrichter, Sensorzuordnung und Prognoseparameter.
 - Deutsche Benutzertexte mit ä/ö/ü/ß; englische Übersetzung synchron halten.
 - Desktop, Handy und Touch unterstützen, nicht nur einen schmalen Viewport.
+  Im mobilen Panel-Header den Home-Assistant-Menüknopf sichtbar halten.
 - Bedienung und Modellgrenzen stehen in [anleitungs.md](anleitungs.md).
   Das separate [symcon/](symcon/) bleibt außerhalb dieses Arbeitsumfangs.
 
@@ -25,7 +26,9 @@ Keine adaptive Selbstoptimierung, Lernfilter oder Adaptive-Sensoren.
 - [analysis.py](analysis.py): Quellengewichtung, Wechselrichterbegrenzung,
   Rückgruppierung einzelner Flächen und Tagesvergleich.
 - [coordinator.py](coordinator.py): Quellen abrufen/cachen, unverdeckte Basis bilden,
-  begrenzen, lokale Verschattung anwenden, zu Arrays gruppieren und veröffentlichen.
+  theoretisches Maximalpotenzial bilden, lokale Verschattung anwenden, zu Arrays
+  gruppieren und veröffentlichen. Letzte erfolgreiche Abrufzeit je Quelle über die
+  Analyse-API bereitstellen; Cache-Treffer aktualisieren diesen Zeitpunkt nicht.
 - [dwd_icon.py](dwd_icon.py), [open_meteo_source.py](open_meteo_source.py),
   [forecast_solar_source.py](forecast_solar_source.py): Prognosen je einzelner Fläche.
   Rohe forecast.solar-Flächenerträge für den Vergleich ohne zusätzliche Abrufe erhalten.
@@ -72,6 +75,26 @@ Keine adaptive Selbstoptimierung, Lernfilter oder Adaptive-Sensoren.
 - Begrenzung vor Objektverschattung anwenden, damit verschatteter Ertrag niemals
   die identische unverdeckte Basis übersteigt. Wechselrichterlimits sind konservative
   Tagesskalierung, kein physikalisches Clipping-/Umverteilungsmodell.
+- Das Maximalpotenzial aus Open-Meteos `terrestrial_radiation` (extraterrestrisch,
+  horizontal, ohne Atmosphäre und Bewölkung) berechnen und auf Flächenneigung/
+  Ausrichtung projizieren; bei extraterrestrischer Direktstrahlung darf der
+  Projektionsfaktor größer als 1 sein. Wp ist Nennleistung bei 1000 W/m², keine
+  harte Leistungsobergrenze. Wenn Open-Meteo nicht verfügbar ist, Haurwitz als
+  Clear-Sky-Fallback nutzen. Objektschatten nicht anwenden; bestehende konservative
+  Tages-/Wechselrichterlimits beibehalten. Open-Meteo-GTI enthält direkte und
+  diffuse Einstrahlung auf der PV-Fläche; diese nicht nochmals addieren. Diagramme
+  zeigen Potential, Wetterprognose ohne Objektschatten und berechnete Verschattung
+  getrennt.
+- Tagesverluste zeitpunktbezogen nur aus gemeinsam vorhandenen Modellwerten
+  bilden: Maximalpotenzial minus Bewölkungsprognose sowie Bewölkungsprognose
+  minus Verschattungsprognose. Tatsächlichen Tagesertrag im Frontend aus der
+  zeitgewichteten HA-Historie der Gesamt-Wechselrichterleistung und den
+  aufgezeichneten Messminuten integrieren; bei Lücken als Teilsumme markieren.
+- Tageszeilen der Ertragsprognose in der Solarprognose-Ansicht per Datumsauswahl
+  mit den Stundencharts verbinden; die ausgewählte Zeile dezent hervorheben.
+  Datumsauswahl muss die ausgewählte lokale Prognoseperiode analysieren, darf
+  keine HA-Messhistorie für zukünftige Tage vortäuschen und auf den konfigurierten
+  Prognosehorizont beschränkt bleiben.
 - Schattenfaktoren instanzlokal cachen; keine alten Geometrien nach Reload behalten.
   W, Wh, Wp und Zeitzonen konsistent halten.
 - Keine Arrays: `setup_required`, keine Quellenabrufe, Sensoren nicht verfügbar.
@@ -84,6 +107,9 @@ Keine adaptive Selbstoptimierung, Lernfilter oder Adaptive-Sensoren.
 
 ## Persistenz, Diagramme und Sicherheit
 
+- Wetterquellen-Abrufzeiten je Quelle getrennt von `history_until` ausgeben und
+  formatieren. `Messwerte abgerufen bis` bleibt ausschließlich die Grenze des
+  HA-Historienabrufs.
 - Migrationen 1–7 erhalten: 3→4 entfernt Lernoptionen/Adaptive-Store/-Entitäten;
   4→5 ergänzt Flächen und konvertiert alte Polygone in geschlossene Höhenlinien;
   5→6 ergänzt Wechselrichter; 6→7 ergänzt Flächenmetadaten ohne geratene

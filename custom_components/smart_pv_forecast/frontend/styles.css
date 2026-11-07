@@ -35,6 +35,7 @@ header {
 .brand .unsaved { font-size: 10px; padding: 2px 6px; }
 .header-navigation { display: flex; flex: 1 1 420px; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .header-actions { display: flex; align-items: center; gap: 6px; }
+#home-assistant-menu { display: none; }
 #site-picker select { width: auto; max-width: 220px; }
 h1 { font-size: 20px; line-height: 1.2; margin: 0; letter-spacing: -.6px; }
 .subtitle, .muted { color: var(--secondary-text-color, #627784); font-size: 12px; }
@@ -134,8 +135,15 @@ summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
 .analysis { padding: 8px 12px 20px; max-width: 1600px; margin: auto; }
 .analysis-head { margin-bottom: 8px; }
 .forecast-overview { margin-bottom: 10px; }
-.forecast-rows { display: grid; grid-template-columns: 80px minmax(0, 1fr) max-content; align-items: center; gap: 12px; margin: 16px 0; }
-.forecast-row { display: contents; }
+.forecast-rows { display: flex; flex-direction: column; gap: 4px; margin: 16px 0; }
+.forecast-row {
+  display: grid; grid-template-columns: 80px minmax(0, 1fr) max-content; align-items: center; gap: 12px;
+  width: 100%; min-width: 0; min-height: 44px; padding: 5px 8px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent;
+  color: inherit; text-align: left;
+}
+button.forecast-row:hover { border-color: color-mix(in srgb, var(--primary-color, #00897b) 18%, transparent); }
+.forecast-row.selected { border-color: color-mix(in srgb, var(--primary-color, #00897b) 20%, transparent); background: color-mix(in srgb, var(--primary-color, #00897b) 7%, transparent); }
 .forecast-label small, .forecast-value small { display: block; font-size: 10px; color: var(--secondary-text-color, #627784); }
 .forecast-today .forecast-label strong { color: var(--studio-accent); }
 .forecast-value { text-align: right; font-size: 13px; }
@@ -157,11 +165,15 @@ summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
 .chart .hit:focus { outline: none; fill: #00897b12; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.series-toggle { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 2px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.series-toggle[aria-pressed="false"] { opacity: .55; }
+.series-toggle:focus-visible { outline: 2px solid var(--primary-color, #00897b); outline-offset: 2px; }
 .swatch { width: 20px; height: 3px; flex-shrink: 0; background: var(--color); }
-.swatch.dashed { background: repeating-linear-gradient(90deg, #8999a6 0 5px, transparent 5px 8px); }
+.swatch.dashed { background: repeating-linear-gradient(90deg, var(--color) 0 5px, transparent 5px 8px); }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
 .stat strong { display: block; font-size: 20px; letter-spacing: -.5px; }
 .stat span { font-size: 11px; color: var(--secondary-text-color, #627784); }
+.stat small { display: block; margin-top: 3px; font-size: 10px; color: var(--secondary-text-color, #627784); }
 .chart-tooltip { min-height: 24px; font-size: 12px; color: var(--studio-accent); overflow-wrap: anywhere; }
 .table-scroll { min-width: 0; }
 table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
@@ -173,6 +185,7 @@ th:first-child, td:first-child { text-align: left; }
 }
 @media (max-width: 700px) {
   header { padding: 6px 8px; gap: 6px; }
+  #home-assistant-menu { display: block; }
   h1 { font-size: 18px; } .brand { flex: 1; min-width: 80px; }
   .header-actions { gap: 4px; }
   .header-actions button { padding: 6px 8px; font-size: 12px; }

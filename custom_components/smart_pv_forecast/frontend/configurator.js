@@ -1,5 +1,5 @@
 import { TEXT, escapeHTML, infoDetails } from "./i18n.js";
-import { renderAnalysis, wireChartInteraction, showChartTooltip } from "./charts.js";
+import { renderAnalysis, wireChartInteraction, wireForecastSelection, showChartTooltip } from "./charts.js?v=0.5.1";
 import { updateRenderedContent } from "./render.js";
 import { areaCenter, surfaceProfile, localPoint, geographicPoint } from "./geometry.js";
 import { Scene3D } from "./scene3d.js";
@@ -44,6 +44,7 @@ class SmartPVConfigurator extends HTMLElement {
     this.pointers = new Map();
     this.loadGeneration = 0;
     this.analysisGeneration = 0;
+    this.selectedForecastDate = null;
     this.previewGeneration = 0;
     this.previewLive = true;
     this.previewHeight = null;
@@ -53,6 +54,10 @@ class SmartPVConfigurator extends HTMLElement {
       if (this.dirty || this.mode === "draw") { event.preventDefault(); event.returnValue = ""; }
     };
     this._refreshAnalysis = () => {
+      if (this.selectedForecastDate && this.analysis?.timezone) {
+        const today = new Intl.DateTimeFormat("en-CA", { timeZone: this.analysis.timezone }).format(new Date());
+        if (this.selectedForecastDate < today) this.selectedForecastDate = null;
+      }
       if (!document.hidden && this.isConnected && this.tab === "analysis" && this.site
         && !this.busy && !this.dirty && !this.analysisLoading) this.loadAnalysis();
     };
@@ -60,6 +65,8 @@ class SmartPVConfigurator extends HTMLElement {
 
   set hass(value) {
     this._hass = value;
+    const menuButton = this.shadowRoot.getElementById("home-assistant-menu");
+    if (menuButton) menuButton.hass = value;
     const language = value.language?.startsWith("de") ? "de" : "en";
     const changed = language !== this.language;
     this.language = language;
@@ -94,6 +101,7 @@ class SmartPVConfigurator extends HTMLElement {
     clearInterval(this.previewClock);
     clearInterval(this.analysisClock);
     this.unwireCharts?.();
+    this.unwireForecast?.();
     this.previewGeneration++;
     this.loadGeneration++;
     this.pointers.clear();
@@ -128,6 +136,7 @@ class SmartPVConfigurator extends HTMLElement {
     this.loadGeneration++;
     clearTimeout(this.analysisTimer);
     this.site = site ? structuredClone(site) : null;
+    this.selectedForecastDate = null;
     if (this.site) for (const array of this.site.pv_arrays) array.areas ||= [];
     if (this.site) {
       this.site.inverters ||= [];
@@ -155,8 +164,9 @@ class SmartPVConfigurator extends HTMLElement {
     this.tiles.clear();
     const t = this.t;
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="${new URL("./styles.css", import.meta.url)}">
+      <link rel="stylesheet" href="${new URL("./styles.css?v=0.5.1", import.meta.url)}">
       <header>
+        <ha-menu-button id="home-assistant-menu"></ha-menu-button>
         <div class="brand"><h1>${t.title}</h1><span id="summary" class="muted"></span>
           <span id="dirty" class="badge unsaved" hidden>${t.dirty}</span></div>
         <nav class="header-navigation"><label id="site-picker" ${this.sites.length > 1 ? "" : "hidden"}>${t.site}<select id="sites">${this.sites.map((s) =>
@@ -219,6 +229,9 @@ class SmartPVConfigurator extends HTMLElement {
         <section id="forecast-settings" class="card" style="margin-top:16px"></section>
         ${infoDetails(t.sources, t.sourceHint)}
       </section>`;
+    const menuButton = this.shadowRoot.getElementById("home-assistant-menu");
+    menuButton.hass = this._hass;
+    menuButton.narrow = true;
     const on = (id, action) => { this.shadowRoot.getElementById(id).onclick = action; };
     on("save", () => this.save());
     on("add-array", () => this.addArray()); on("add-object", () => this.startDraw({ kind: "object" }));
@@ -786,32 +799,40 @@ class SmartPVConfigurator extends HTMLElement {
     this.analysisMessage = this.analysis ? "" : this.t.loading;
     this.renderCharts();
     try {
-      const data = await this._hass.callWS({ type: "smart_pv_forecast/analysis", entry_id: entryID });
+      const requestData = { type: "smart_pv_forecast/analysis", entry_id: entryID };
+      if (this.selectedForecastDate) requestData.date = this.selectedForecastDate;
+      const data = await this._hass.callWS(requestData);
       if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
       if (data.revision !== this.site.revision) throw { code: "updating", message: this.t.pending };
       this.analysisMessage = "";
-      try {
-        const savedSite = this.sites.find(site => site.entry_id === entryID);
-        const history = await loadSiteHistory(this._hass, savedSite, data);
-        if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
-        data.arrays.forEach((array, index) => {
-          array.strings = history.strings[index];
-        });
-        data.total.measurement = history.total;
-        data.total.inverters = history.inverters;
-        data.totalMeasurementStatus = history.totalStatus;
-        data.history_until = history.until;
-        data.historyMissing = history.strings.flat().some(string => !string.values.some(value => value !== null));
-      } catch (error) {
-        if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
-        data.historyError = `${this.t.historyError}: ${error.message || error}`;
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: data.timezone }).format(new Date());
+      if (data.date === today) {
+        try {
+          const savedSite = this.sites.find(site => site.entry_id === entryID);
+          const history = await loadSiteHistory(this._hass, savedSite, data);
+          if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
+          data.arrays.forEach((array, index) => {
+            array.strings = history.strings[index];
+          });
+          data.total.measurement = history.total;
+          data.total.inverters = history.inverters;
+          data.totalMeasurementStatus = history.totalStatus;
+          data.history_until = history.until;
+          data.historyMissing = history.strings.flat().some(string => !string.values.some(value => value !== null));
+        } catch (error) {
+          if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
+          data.historyError = `${this.t.historyError}: ${error.message || error}`;
+        }
       }
+      if (!this.selectedForecastDate) this.selectedForecastDate = data.date;
       this.analysis = data;
     } catch (error) {
       if (generation !== this.loadGeneration || request !== this.analysisGeneration || !this.isConnected) return;
       this.analysisMessage = error.code === "updating" || error.code === "unavailable" ? this.t.pending : `${this.t.error}: ${error.message || error}`;
       if ((error.code === "updating" || error.code === "unavailable") && attempt < 10) {
         this.analysisTimer = setTimeout(() => this.loadAnalysis(attempt + 1), 2000);
+      } else {
+        this.selectedForecastDate = this.analysis?.date || null;
       }
     } finally {
       if (request === this.analysisGeneration) this.analysisLoading = false;
@@ -822,10 +843,18 @@ class SmartPVConfigurator extends HTMLElement {
     this.shadowRoot.getElementById("analysis-status").textContent = this.analysisMessage || "";
     const root = this.shadowRoot.getElementById("charts");
     const settings = this.sites.find(site => site.entry_id === this.site?.entry_id)?.settings;
-    updateRenderedContent(root, renderAnalysis(this.analysis, this.t, this.language, settings));
+    updateRenderedContent(root, renderAnalysis(this.analysis, this.t, this.language, settings,
+      this.selectedForecastDate || this.analysis?.date));
     this.unwireCharts?.();
+    this.unwireForecast?.();
     if (this.analysis) {
       this.unwireCharts = wireChartInteraction(root, this.analysis, this.t, this.language);
+      this.unwireForecast = wireForecastSelection(root, (date) => {
+        if (date === this.selectedForecastDate) return;
+        this.selectedForecastDate = date;
+        this.renderCharts();
+        this.loadAnalysis();
+      });
       root.querySelectorAll(".chart-tooltip:not([hidden])").forEach(tooltip => {
         const chart = tooltip.dataset.tooltip, hour = Number(tooltip.dataset.selectedHour);
         if ((chart === "total" ? this.analysis.total : this.analysis.arrays[Number(chart)])

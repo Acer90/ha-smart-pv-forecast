@@ -20,6 +20,7 @@ class OpenMeteoTiltedPayload:
     timezone: str
     hourly_time: list[str]
     array_global_tilted_irradiance: list[list[float | None]]
+    array_terrestrial_radiation: list[list[float | None]] | None = None
 
 
 def _ha_azimuth_to_open_meteo(ha_azimuth: float) -> float:
@@ -39,6 +40,34 @@ def _sun_elevation(latitude: float, longitude: float, when: datetime) -> float:
 
     observer = Observer(latitude=latitude, longitude=longitude)
     return float(elevation(observer, when))
+
+
+def _payload_hourly_slots(payload: OpenMeteoTiltedPayload) -> list[datetime]:
+    tz = ZoneInfo(payload.timezone)
+    slots: list[datetime] = []
+    for ts_str in payload.hourly_time:
+        parsed_ts = datetime.fromisoformat(ts_str)
+        ts = parsed_ts.replace(tzinfo=tz) if parsed_ts.tzinfo is None else parsed_ts.astimezone(tz)
+        slots.append(ts.replace(minute=0, second=0, microsecond=0))
+    return slots
+
+
+def build_terrestrial_radiation_maps(
+    payload: OpenMeteoTiltedPayload,
+) -> list[dict[datetime, float | None]] | None:
+    radiation = payload.array_terrestrial_radiation
+    if radiation is None:
+        return None
+    if len(radiation) != len(payload.array_global_tilted_irradiance):
+        raise ValueError("Unexpected Open-Meteo terrestrial radiation array count")
+    slots = _payload_hourly_slots(payload)
+    return [
+        {
+            timestamp: max(0.0, float(value)) if value is not None else None
+            for timestamp, value in zip(slots, values, strict=True)
+        }
+        for values in radiation
+    ]
 
 
 def _daily_scale_factors_for_limit(
@@ -80,17 +109,8 @@ def build_array_watts_from_tilted_payload(
     if not pv_arrays:
         return []
 
-    tz = ZoneInfo(payload.timezone)
     array_watts: list[dict[datetime, float]] = [dict() for _ in pv_arrays]
-
-    hourly_slots: list[datetime] = []
-    for ts_str in payload.hourly_time:
-        parsed_ts = datetime.fromisoformat(ts_str)
-        if parsed_ts.tzinfo is None:
-            ts = parsed_ts.replace(tzinfo=tz)
-        else:
-            ts = parsed_ts.astimezone(tz)
-        hourly_slots.append(ts.replace(minute=0, second=0, microsecond=0))
+    hourly_slots = _payload_hourly_slots(payload)
 
     for idx, arr in enumerate(pv_arrays):
         irradiance_series = (
@@ -217,12 +237,13 @@ class OpenMeteoClient:
         timezone: str | None = None
         reference_times: list[str] | None = None
         irradiance_series: list[list[float | None]] = []
+        terrestrial_radiation_series: list[list[float | None]] = []
 
         for arr in pv_arrays:
             params = {
                 "latitude": arr.get("latitude", latitude),
                 "longitude": arr.get("longitude", longitude),
-                "hourly": "global_tilted_irradiance",
+                "hourly": "global_tilted_irradiance,terrestrial_radiation",
                 "tilt": float(arr["tilt"]),
                 "azimuth": _ha_azimuth_to_open_meteo(float(arr["azimuth"])),
                 "timezone": "auto",
@@ -237,11 +258,14 @@ class OpenMeteoClient:
             tz = str(data.get("timezone") or "UTC")
             times = hourly.get("time") or []
             gti = hourly.get("global_tilted_irradiance") or []
+            terrestrial_radiation = hourly.get("terrestrial_radiation")
 
             if (
                 not isinstance(times, list)
                 or not isinstance(gti, list)
                 or len(times) != len(gti)
+                or not isinstance(terrestrial_radiation, list)
+                or len(times) != len(terrestrial_radiation)
             ):
                 raise ValueError("Unexpected Open-Meteo response format")
 
@@ -252,17 +276,27 @@ class OpenMeteoClient:
                 irradiance_series.append(
                     [float(v) if v is not None else None for v in gti]
                 )
+                terrestrial_radiation_series.append(
+                    [float(v) if v is not None else None for v in terrestrial_radiation]
+                )
                 continue
 
             by_time = {
                 str(t): float(v) if v is not None else None
                 for t, v in zip(times, gti, strict=True)
             }
+            terrestrial_by_time = {
+                str(t): float(v) if v is not None else None
+                for t, v in zip(times, terrestrial_radiation, strict=True)
+            }
             aligned = [by_time.get(ts) for ts in reference_times]
+            terrestrial_aligned = [terrestrial_by_time.get(ts) for ts in reference_times]
             irradiance_series.append(aligned)
+            terrestrial_radiation_series.append(terrestrial_aligned)
 
         return OpenMeteoTiltedPayload(
             timezone=timezone or "UTC",
             hourly_time=reference_times or [],
             array_global_tilted_irradiance=irradiance_series,
+            array_terrestrial_radiation=terrestrial_radiation_series,
         )

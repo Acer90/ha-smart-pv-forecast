@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ from .site import geometry_required, normalize_arrays, normalize_inverters, norm
 
 PANEL_PATH = "smart-pv"
 STATIC_URL = "/smart_pv_forecast_static"
-DASHBOARD_MODULE = f"{STATIC_URL}/dashboard.js?v=1"
+DASHBOARD_MODULE = f"{STATIC_URL}/dashboard.js?v=0.5.1"
 
 
 async def async_register_dashboard_resource(hass: HomeAssistant) -> None:
@@ -102,7 +103,7 @@ async def async_show_configurator(hass: HomeAssistant, entry_id: str) -> None:
             hass, frontend_url_path=PANEL_PATH,
             webcomponent_name="smart-pv-configurator",
             sidebar_title="Solarprognose", sidebar_icon="mdi:solar-panel",
-            module_url=f"{STATIC_URL}/configurator.js?v=0.5.0",
+            module_url=f"{STATIC_URL}/configurator.js?v=0.5.1",
             require_admin=True,
         )
 
@@ -219,6 +220,7 @@ async def websocket_save_site(hass: HomeAssistant, connection: websocket_api.Act
 @websocket_api.websocket_command({
     vol.Required("type"): "smart_pv_forecast/analysis",
     vol.Required("entry_id"): str,
+    vol.Optional("date"): str,
 })
 @websocket_api.require_admin
 @callback
@@ -230,6 +232,7 @@ def websocket_get_analysis(hass: HomeAssistant, connection: websocket_api.Active
 @websocket_api.websocket_command({
     vol.Required("type"): "smart_pv_forecast/dashboard_analysis",
     vol.Required("entry_id"): str,
+    vol.Optional("date"): str,
 })
 @callback
 def websocket_dashboard_analysis(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
@@ -247,8 +250,18 @@ def _send_analysis(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     if coordinator is None:
         connection.send_error(msg["id"], "unavailable", "Forecast is not loaded")
         return
+    selected_date = None
+    if "date" in msg:
+        try:
+            selected_date = date.fromisoformat(msg["date"])
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_format", "Invalid forecast date")
+            return
+        if selected_date.isoformat() != msg["date"]:
+            connection.send_error(msg["id"], "invalid_format", "Invalid forecast date")
+            return
     try:
-        analysis = coordinator.get_daily_analysis()
+        analysis = coordinator.get_daily_analysis(selected_date) if selected_date else coordinator.get_daily_analysis()
     except ValueError as err:
         connection.send_error(msg["id"], "unavailable", str(err))
         return

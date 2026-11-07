@@ -309,8 +309,13 @@ Zurückkehren aus einem ausgeblendeten Browser-Tab, sofern keine ungespeicherten
 Änderungen vorliegen. **Messwerte abgerufen bis** zeigt die Abrufgrenze in der
 Home-Assistant-Ortszeit; vollständig fehlende Stunden bleiben leer. Die laufende
 Stunde wird bis zu dieser Grenze angezeigt, nicht erst nach Stundenende.
-Die zusätzlichen Buttons für Neuladen, Diagrammaktualisierung und das
-Home-Assistant-Hamburgermenü entfallen; **Speichern** bleibt im Header.
+Daneben zeigt **Wetterdaten zuletzt abgerufen** für jede konfigurierte Quelle
+den letzten erfolgreichen Abrufzeitpunkt. Der Zeitstempel ist unabhängig von
+der Abrufgrenze der Messwerthistorie; bei wiederverwendeten Cache-Daten bleibt
+er auf dem Zeitpunkt des letzten echten Quellenabrufs stehen.
+Die zusätzlichen Buttons zum Neuladen und für die Diagrammaktualisierung entfallen.
+Auf schmalen Displays steht links im Header ein Menüknopf zum Öffnen des
+Home-Assistant-Menüs bereit; **Speichern** bleibt im Header.
 Eine doppelte Stunde bei Zeitumstellung wird zeitgewichtet zusammengefasst;
 die übersprungene Stunde bleibt leer.
 Fehler beim Historienabruf werden sichtbar gemeldet; Prognosekurven bleiben nutzbar.
@@ -359,7 +364,10 @@ Es gibt zwei Karten mit **visuellem Editor**:
   einzelnes **Array** auswählen. Jede Karte enthält genau ein Diagramm mit
   Prognose, Messkurven, Tooltip und aufklappbarer Stundentabelle.
   Array-Karten zeigen die dort definierten String-Sensoren, die Gesamtkarte
-  die Summe der Wechselrichter-PV-Leistungssensoren.
+  die Summe der Wechselrichter-PV-Leistungssensoren. Über die Schaltflächen in
+  der Legende lassen sich alle gezeichneten Datenreihen einzeln ein- und
+  ausblenden. **Maximal möglicher Sonnenertrag** ist zunächst ausgeblendet;
+  alle übrigen Datenreihen sind zunächst eingeblendet.
 
 Bei genau einem Standort ist dessen automatische Auswahl möglich; bei
 mehreren Standorten muss einer ausgewählt werden. Zum Anzeigen ist kein
@@ -414,12 +422,25 @@ eingelesen und korrigierte Prognosen bereitgestellt werden.
 
 Unter **Heute · 0–24 Uhr** erscheinen:
 
+Eine Zeile in der Ertragsprognose auswählen, um die Stundencharts auf diesen
+lokalen Prognosetag umzustellen. Die gesamte ausgewählte Zeile wird dezent markiert.
+
 1. Ein Leistungsdiagramm für die **Gesamtanlage** in W:
-   **Ohne Objektverschattung (100 %)** gegenüber **Mit berechneter Verschattung**,
+   **Maximal möglicher Sonnenertrag**, **Durch Bewölkung** und **Durch Verschattung**,
    zusätzlich die **gemessene Gesamt-PV-Leistung** aus der HA-Historie.
+   Oberhalb des Diagramms steht die gemessene Energie als Hauptwert; darunter
+   wird das Maximalpotenzial angezeigt. Unter „Durch Bewölkung“ steht der
+   Bewölkungsverlust, unter „Durch Verschattung“ der Verschattungsverlust.
+   Die Messenergie wird aus der aufgezeichneten
+   Wechselrichterleistung und den tatsächlich abgedeckten Messminuten integriert;
+   bei Lücken kennzeichnet „≥“ einen unvollständigen Messzeitraum.
 2. Für **jedes Array** ein Leistungsvergleich in W:
-   **Ohne Objektverschattung (100 %)** gegenüber **Mit berechneter Verschattung**.
-   Dazu Tagesenergie in kWh und die Tagesreduktion.
+   **Maximal möglicher Sonnenertrag**, **Durch Bewölkung** und **Durch Verschattung**.
+   Dazu Tagesenergie in kWh sowie Bewölkungs- und Verschattungsverlust.
+
+Die Y-Achse jedes Leistungsdiagramms skaliert automatisch anhand der sichtbaren
+Kurven und Messreihen. Beim Ein- oder Ausblenden einer Reihe werden Achse und
+Diagramm gemeinsam neu skaliert.
 
 Das frühere eigenständige Prozentdiagramm der Verschattungsreduktion entfällt.
 Prozentwerte bleiben als Kennzahl, in der Stundentabelle und im Tooltip erhalten.
@@ -462,12 +483,25 @@ nachträglich archivierte damalige Prognose.
 Stunden antippen oder mit Maus/Tastatur auswählen, um genaue Werte zu sehen.
 Die aufklappbare Stundentabelle enthält die Zahlen zusätzlich.
 
-Beide Kurven verwenden dieselben Wetterdaten, Quellengewichte und Begrenzungen;
-der Unterschied ist die konfigurierte lokale Objektverschattung. „100 %“ bedeutet
-also **unverschattete Modellprognose**, nicht dauerhaft die installierte Wp-Leistung.
+Die Linie **Maximal möglicher Sonnenertrag** verwendet Open-Meteos
+`terrestrial_radiation`: extraterrestrische Einstrahlung auf eine horizontale
+Fläche am Oberrand der Atmosphäre, also ohne Atmosphäre, Bewölkung und
+Objektschatten. Die geometrische Projektion berücksichtigt, dass die Einstrahlung
+auf eine geneigte Fläche höher als auf eine horizontale Fläche sein kann. Die
+Wp-Angabe ist die Nennleistung bei 1000 W/m² und daher keine harte Leistungsgrenze.
+Konfigurierte Wechselrichterlimits werden weiterhin konservativ auf Tagesbasis
+angewendet. Ist Open-Meteo nicht verfügbar, dient das Haurwitz-Clear-Sky-Modell
+als Näherungsfallback. Dieser Wert ist ein theoretischer Vergleichswert und kein
+realistischer Wetter- oder PV-Ertragsforecast. Open-Meteos GTI enthält bereits
+direkte und diffuse Einstrahlung auf der PV-Fläche; direkte Einstrahlung wird
+nicht nochmals addiert.
+Die Linien **Durch Bewölkung** und **Durch Verschattung** verwenden dieselben
+Wetterdaten, Quellengewichte und Begrenzungen; der Unterschied ist die konfigurierte
+lokale Objektverschattung. Die bewölkungsbedingte Linie ist also die
+Wetterprognose ohne Objektschatten, nicht die installierte Wp-Leistung.
 Die lokale Zeitzone von Home Assistant bestimmt den Tag.
 
-Die beiden Prognosekurven sind ein **Modellvergleich**, keine Aufzeichnung gemessener Erträge.
+Die drei Prognosekurven sind ein **Modellvergleich**, keine Aufzeichnung gemessener Erträge.
 Auch bereits vergangene Stunden werden mit der aktuell gespeicherten Geometrie
 berechnet. Die bestehende Erhaltung vergangener Prognosestunden in den Sensoren
 ist davon unabhängig. Fehlende Quelldaten bleiben Lücken; bei nächtlicher
@@ -548,6 +582,8 @@ ausdrücklich nach und führt ebenfalls zurück in diesen Einrichtungszustand.
 
 ## Handy, Touch und Modellgrenzen
 
+- Das Home-Assistant-Menü lässt sich auf schmalen Displays über den Menüknopf
+  links im Header öffnen.
 - Karte mit einem Finger verschieben, mit zwei Fingern zoomen; Punkte durch Antippen
   setzen. Am PC stehen Maus, Mausrad und Zoomtasten zur Verfügung.
 - Auf dem Handy erscheint das Eigenschaftenfenster als scrollbare Karte am unteren

@@ -85,12 +85,14 @@ def _angle_in_range(angle: float, start: float, end: float) -> bool:
     return angle >= start or angle <= end
 
 
-def _poa_factor(*, sun_az: float, sun_el: float, panel_az: float, panel_tilt: float) -> float:
+def _poa_factor(*, sun_az: float, sun_el: float, panel_az: float, panel_tilt: float,
+                allow_gain: bool = False) -> float:
     """Approximate plane-of-array factor from global horizontal irradiance.
 
     Uses a simple cosine projection model to weight power by orientation.
     The input radiation is treated as horizontal; we approximate the relative
-    gain/loss vs. horizontal by dividing by sin(elevation).
+    gain/loss vs. horizontal by dividing by sin(elevation). Extraterrestrial
+    radiation is direct, so its plane projection may legitimately exceed one.
     """
     sin_el = math.sin(math.radians(sun_el))
     if sin_el <= 0.0:
@@ -110,9 +112,8 @@ def _poa_factor(*, sun_az: float, sun_el: float, panel_az: float, panel_tilt: fl
     denom = max(0.15, sin_el)
     factor = cos_inc / denom
 
-    # Keep POA correction conservative for this integration because the upstream
-    # radiation signal is already global and amplified factors can otherwise
-    # produce unrealistic peaks in multi-array setups.
+    if allow_gain:
+        return max(0.0, float(factor))
     return max(0.0, min(1.0, float(factor)))
 
 
@@ -251,6 +252,57 @@ def build_array_watts(
             for index, values in enumerate(array_watts)
         ]
     return array_watts
+
+
+def build_maximum_array_watts(
+    slots: list[dict[datetime, float]],
+    *,
+    latitude: float,
+    longitude: float,
+    pv_arrays: Any,
+    damping_morning: float,
+    damping_evening: float,
+    horizon_deg: float,
+    terrestrial_radiation: list[dict[datetime, float | None]] | None = None,
+) -> list[dict[datetime, float]]:
+    """Estimate maximum array power using extraterrestrial radiation when available."""
+    arrays = normalize_arrays(pv_arrays)
+    if terrestrial_radiation is not None and len(terrestrial_radiation) != len(arrays):
+        raise ValueError("Terrestrial radiation must be provided for every PV surface")
+    result: list[dict[datetime, float]] = [dict() for _ in arrays]
+    for index, arr in enumerate(arrays):
+        for hour_key in slots[index]:
+            midpoint = hour_key + timedelta(minutes=30)
+            sun_az, sun_el = _sun_position(
+                arr.get("latitude", latitude), arr.get("longitude", longitude), midpoint
+            )
+            if sun_el < float(horizon_deg):
+                result[index][hour_key] = 0.0
+                continue
+
+            if terrestrial_radiation is not None:
+                ghi = terrestrial_radiation[index].get(hour_key)
+                if ghi is None:
+                    continue
+            else:
+                cosine_zenith = math.sin(math.radians(sun_el))
+                if cosine_zenith <= 0:
+                    result[index][hour_key] = 0.0
+                    continue
+                ghi = 1098.0 * cosine_zenith * math.exp(-0.059 / cosine_zenith)
+            poa_factor = _poa_factor(
+                sun_az=sun_az, sun_el=sun_el,
+                panel_az=arr["azimuth"], panel_tilt=arr["tilt"],
+                allow_gain=True,
+            )
+            power = float(ghi) / 1000.0 * float(arr["peak"]) * poa_factor
+            local_hour = midpoint.hour
+            damping = max(
+                0.0,
+                1.0 - float(damping_morning if local_hour < 12 else damping_evening),
+            )
+            result[index][hour_key] = max(0.0, power * damping)
+    return result
 
 
 def build_estimate(

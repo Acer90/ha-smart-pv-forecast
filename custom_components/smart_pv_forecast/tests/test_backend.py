@@ -4,7 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -177,6 +177,26 @@ class ConfiguratorTests(unittest.IsolatedAsyncioTestCase):
             self.hass, self.connection, {"id": 1, "entry_id": self.entry.entry_id})
         self.connection.send_error.assert_called_once_with(
             1, "updating", "The forecast is being recalculated")
+
+    async def test_analysis_accepts_a_selected_forecast_day(self):
+        analysis = {"revision": self.site["revision"], "arrays": [], "total": None}
+        get_analysis = Mock(return_value=analysis)
+        self.entry.runtime_data = SimpleNamespace(get_daily_analysis=get_analysis)
+        configurator.websocket_get_analysis(
+            self.hass, self.connection, {
+                "id": 1, "entry_id": self.entry.entry_id, "date": "2026-10-25",
+            })
+        get_analysis.assert_called_once_with(date(2026, 10, 25))
+        self.connection.send_result.assert_called_once_with(1, analysis)
+
+    async def test_analysis_rejects_noncanonical_selected_date(self):
+        self.entry.runtime_data = SimpleNamespace(get_daily_analysis=Mock())
+        configurator.websocket_get_analysis(
+            self.hass, self.connection, {
+                "id": 1, "entry_id": self.entry.entry_id, "date": "2026-1-2",
+            })
+        self.entry.runtime_data.get_daily_analysis.assert_not_called()
+        self.connection.send_error.assert_called_once_with(1, "invalid_format", "Invalid forecast date")
 
     async def test_save_preserves_source_options_and_mounting(self):
         msg = self.message()
@@ -620,12 +640,16 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         hour = datetime(2026, 6, 21, 12, tzinfo=timezone.utc)
         payload = load("open_meteo_source").OpenMeteoTiltedPayload(
             "UTC", [hour.isoformat()], [[1000], [500], [1000]],
+            [[1400], [900], [700]],
         )
         coordinator._open_meteo_client.fetch_radiation = AsyncMock(return_value=payload)
         coordinator._async_init_energy_snapshot = AsyncMock()
         coordinator._async_update_energy_snapshot = AsyncMock()
+        dwd = load("dwd_icon")
         with patch.object(coordinator_module, "dt_now", return_value=hour), patch(
             "smart_pv_test.open_meteo_source._sun_elevation", return_value=45
+        ), patch.object(dwd, "_sun_position", return_value=(180, 45)), patch.object(
+            dwd, "_poa_factor", return_value=1
         ), patch.object(coordinator_module.ObjectShading, "factor",
                         side_effect=lambda index, ts: [0.5, 0.8, 0.4][index]):
             estimate = await coordinator._async_update_data()
@@ -637,10 +661,12 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(estimate.watts[hour], 1500)
         self.assertEqual([a["name"] for a in analysis["arrays"]], ["Roof", "Garage"])
         self.assertEqual(analysis["timezone"], "Europe/Berlin")
+        self.assertEqual(analysis["source_fetch_times"], {"Open-Meteo": hour.isoformat()})
         roof = analysis["arrays"][0]["hours"][14]
         self.assertAlmostEqual(roof["baseline_w"], 2000)
         self.assertAlmostEqual(roof["shaded_w"], 1300)
         self.assertAlmostEqual(roof["reduction_percent"], 35)
+        self.assertAlmostEqual(roof["max_potential_w"], 3200)
         self.assertAlmostEqual(analysis["arrays"][1]["hours"][14]["shaded_w"], 200)
 
     async def test_no_learning_and_shading_is_wired_in_update(self):

@@ -153,6 +153,24 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(report["forecast_days"][-1]["date"],
                              (start + timedelta(days=count - 1)).date().isoformat())
 
+    def test_selected_forecast_day_updates_hourly_analysis(self):
+        start = datetime(2026, 10, 9, tzinfo=timezone.utc)
+        next_day = start + timedelta(days=1)
+        baseline = {start: 100, next_day: 300}
+        shaded = {start: 50, next_day: 150}
+        maximum = {start: 120, next_day: 360}
+        report = analysis.daily_analysis([{"name": "Roof"}], [baseline], [shaded], "UTC",
+            start, "revision", ["Test"], forecast_day_count=2, max_potential=[maximum],
+            selected_date=next_day.date())
+        self.assertEqual(report["date"], "2026-10-10")
+        self.assertEqual(report["arrays"][0]["hours"][0]["baseline_w"], 300)
+        self.assertEqual(report["total"]["hours"][0]["shaded_w"], 150)
+        self.assertEqual([day["date"] for day in report["forecast_days"]],
+                         ["2026-10-09", "2026-10-10"])
+        with self.assertRaisesRegex(ValueError, "outside the forecast period"):
+            analysis.daily_analysis([{"name": "Roof"}], [baseline], [shaded], "UTC",
+                start, "revision", ["Test"], forecast_day_count=2, selected_date=date(2026, 10, 11))
+
     def test_total_and_seven_day_forecast_require_common_array_slots(self):
         start = datetime(2026, 10, 9, tzinfo=timezone.utc)
         next_day = start + timedelta(days=1)
@@ -216,18 +234,25 @@ class AnalysisTests(unittest.TestCase):
         start = datetime(2026, 10, 9, tzinfo=timezone.utc)
         base = {start.replace(hour=h): 1000 if 8 <= h < 18 else 0 for h in range(24)}
         shaded = {ts: v * 0.5 for ts, v in base.items()}
+        maximum_potential = {ts: v * 1.2 for ts, v in base.items()}
         report = analysis.daily_analysis([{"name": "Roof"}], [base], [shaded],
-                                          "UTC", start, "revision", ["Test"])
+                                          "UTC", start, "revision", ["Test"],
+                                          max_potential=[maximum_potential])
         result = report["arrays"][0]
         self.assertEqual([h["hour"] for h in result["hours"]], list(range(24)))
         self.assertEqual(result["hours"][12]["baseline_w"], 1000)
         self.assertEqual(result["hours"][12]["shaded_w"], 500)
+        self.assertEqual(result["hours"][12]["max_potential_w"], 1200)
         self.assertEqual(result["hours"][12]["reduction_percent"], 50)
         self.assertEqual(result["hours"][0]["reduction_percent"], 0)
         self.assertEqual(result["baseline_wh"], 10000)
         self.assertEqual(result["shaded_wh"], 5000)
+        self.assertEqual(result["max_potential_wh"], 12000)
+        self.assertEqual(result["cloud_loss_wh"], 2000)
+        self.assertEqual(result["shading_loss_wh"], 5000)
         self.assertEqual(result["reduction_percent"], 50)
         self.assertEqual(result["covered_hours"], 24)
+        self.assertEqual(report["forecast_days"][0]["max_potential_wh"], 12000)
 
     def test_day_uses_local_timezone_and_missing_data_stays_missing(self):
         now = datetime(2026, 10, 8, 23, 30, tzinfo=timezone.utc)
